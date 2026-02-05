@@ -22,9 +22,17 @@ from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import SessionManager
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ExecToolConfig, MCPConfig
+    from nanobot.config.schema import (
+        CompactionConfig,
+        ContextConfig,
+        ExecToolConfig,
+        MCPConfig,
+        MemoryConfig,
+    )
     from nanobot.cron.service import CronService
     from nanobot.mcp import MCPManager
+    from nanobot.memory.vectors import VectorStore
+    from nanobot.session.manager import Session
 
 
 class AgentLoop:
@@ -51,8 +59,18 @@ class AgentLoop:
         channel_manager: ChannelManager | None = None,
         cron_service: "CronService | None" = None,
         mcp_config: "MCPConfig | None" = None,
+        context_config: "ContextConfig | None" = None,
+        compaction_config: "CompactionConfig | None" = None,
+        memory_config: "MemoryConfig | None" = None,
+        api_key: str | None = None,
     ):
-        from nanobot.config.schema import ExecToolConfig, MCPConfig
+        from nanobot.config.schema import (
+            CompactionConfig,
+            ContextConfig,
+            ExecToolConfig,
+            MCPConfig,
+            MemoryConfig,
+        )
 
         self.bus = bus
         self.provider = provider
@@ -64,8 +82,15 @@ class AgentLoop:
         self.channel_manager = channel_manager
         self.cron_service = cron_service
         self.mcp_config = mcp_config or MCPConfig()
+        self.context_config = context_config or ContextConfig()
+        self.compaction_config = compaction_config or CompactionConfig()
+        self.memory_config = memory_config or MemoryConfig()
+        self.api_key = api_key
 
-        self.context = ContextBuilder(workspace)
+        # Vector store for semantic memory (initialized in run())
+        self.vector_store: "VectorStore | None" = None
+
+        self.context = ContextBuilder(workspace, memory_enabled=self.memory_config.enabled)
         self.sessions = SessionManager(workspace)
         self.tools = ToolRegistry()
         self.subagents = SubagentManager(
@@ -132,12 +157,83 @@ class AgentLoop:
 
         self.tools.register(InstallMCPServerTool(workspace=self.workspace))
 
+    def _truncate_tool_result(self, result: str) -> str:
+        """Truncate tool result to fit within budget."""
+        from nanobot.utils.tokens import count_tokens, truncate_to_token_limit
+
+        max_tokens = self.context_config.tool_result_budget
+        current_tokens = count_tokens(result)
+
+        if current_tokens <= max_tokens:
+            return result
+
+        logger.debug(f"Truncating tool result from {current_tokens} to {max_tokens} tokens")
+        return truncate_to_token_limit(result, max_tokens)
+
+    def _check_context_budget(self, messages: list[dict]) -> None:
+        """Log warnings if approaching context limits."""
+        from nanobot.utils.tokens import count_messages_tokens
+
+        total_tokens = count_messages_tokens(messages)
+        max_tokens = self.context_config.max_context_tokens
+        threshold = max_tokens * 0.9  # 90% warning threshold
+
+        if total_tokens > threshold:
+            logger.warning(
+                f"Context approaching limit: {total_tokens}/{max_tokens} tokens "
+                f"({total_tokens / max_tokens * 100:.1f}%)"
+            )
+        elif total_tokens > max_tokens * 0.8:
+            logger.debug(f"Context at {total_tokens / max_tokens * 100:.1f}% capacity")
+
+    async def _maybe_compact(
+        self,
+        messages: list[dict],
+        session: "Session",
+    ) -> list[dict]:
+        """Run compaction if context is near capacity and compaction is enabled."""
+        from nanobot.agent.compaction import MessageCompactor, should_compact
+
+        if not self.compaction_config.enabled:
+            return messages
+
+        max_tokens = self.context_config.max_context_tokens
+        threshold = self.compaction_config.threshold
+
+        if not await should_compact(messages, max_tokens, threshold):
+            return messages
+
+        # Create compactor
+        compactor = MessageCompactor(
+            provider=self.provider,
+            model=self.compaction_config.model or self.model,
+            keep_recent=self.compaction_config.keep_recent,
+        )
+
+        # Get previous rolling summary
+        previous_summary = session.get_rolling_summary()
+
+        # Run compaction
+        target_tokens = int(max_tokens * 0.6)  # Compact to 60% capacity
+        compacted, new_summary = await compactor.compact_messages(
+            messages, target_tokens, previous_summary
+        )
+
+        # Store new rolling summary
+        if new_summary != previous_summary:
+            session.set_rolling_summary(new_summary)
+
+        return compacted
+
     async def run(self) -> None:
         """Run the agent loop, processing messages from the bus."""
         self._running = True
 
         # Initialize MCP if enabled
         await self._init_mcp()
+
+        # Initialize memory if enabled
+        self._init_memory()
 
         # Check for restart signal (e.g., after MCP server installation)
         await self._check_restart_signal()
@@ -224,13 +320,25 @@ class AgentLoop:
         # Extract channel context from metadata (e.g., Discord channel history)
         channel_context = msg.metadata.get("channel_context", "") if msg.metadata else ""
 
-        # Build initial messages (use get_history for LLM-formatted messages)
+        # Auto-recall relevant memories
+        memory_context = await self._auto_recall(msg.content)
+        if memory_context:
+            # Prepend memory context to channel context
+            if channel_context:
+                channel_context = f"{memory_context}\n\n{channel_context}"
+            else:
+                channel_context = memory_context
+
+        # Build initial messages (use token-aware history)
         messages = self.context.build_messages(
-            history=session.get_history(),
+            history=session.get_history(max_tokens=self.context_config.history_budget),
             current_message=msg.content,
             media=msg.media if msg.media else None,
             channel_context=channel_context,
         )
+
+        # Run compaction if needed
+        messages = await self._maybe_compact(messages, session)
 
         # Agent loop
         iteration = 0
@@ -238,6 +346,9 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            # Check context budget before LLM call
+            self._check_context_budget(messages)
 
             # Call LLM
             response = await self.provider.chat(
@@ -267,6 +378,8 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    # Truncate large tool results to fit within budget
+                    result = self._truncate_tool_result(result)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -282,6 +395,9 @@ class AgentLoop:
         session.add_message("user", msg.content)
         session.add_message("assistant", final_content)
         self.sessions.save(session)
+
+        # Index conversation to memory (async, don't block response)
+        await self._index_conversation(msg.session_key, msg.content, final_content)
 
         return OutboundMessage(
             channel=msg.channel, chat_id=msg.chat_id, content=final_content, metadata=msg.metadata
@@ -333,10 +449,14 @@ class AgentLoop:
         if isinstance(mcp_install_tool, InstallMCPServerTool):
             mcp_install_tool.set_context(origin_channel, origin_chat_id)
 
-        # Build messages with the announce content
+        # Build messages with the announce content (token-aware history)
         messages = self.context.build_messages(
-            history=session.get_history(), current_message=msg.content
+            history=session.get_history(max_tokens=self.context_config.history_budget),
+            current_message=msg.content,
         )
+
+        # Run compaction if needed
+        messages = await self._maybe_compact(messages, session)
 
         # Agent loop (limited for announce handling)
         iteration = 0
@@ -344,6 +464,9 @@ class AgentLoop:
 
         while iteration < self.max_iterations:
             iteration += 1
+
+            # Check context budget before LLM call
+            self._check_context_budget(messages)
 
             response = await self.provider.chat(
                 messages=messages, tools=self.tools.get_definitions(), model=self.model
@@ -366,6 +489,8 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments)
                     logger.debug(f"Executing tool: {tool_call.name} with arguments: {args_str}")
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    # Truncate large tool results to fit within budget
+                    result = self._truncate_tool_result(result)
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -400,6 +525,151 @@ class AgentLoop:
 
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    async def _auto_recall(self, user_message: str) -> str | None:
+        """
+        Automatically search memory for context relevant to the user's message.
+
+        Args:
+            user_message: The user's incoming message.
+
+        Returns:
+            Relevant memory context, or None if disabled or no results.
+        """
+        if not self.memory_config.enabled or not self.memory_config.auto_recall:
+            return None
+
+        if not self.vector_store:
+            return None
+
+        try:
+            results = await self.vector_store.search(
+                query=user_message,
+                top_k=self.memory_config.search_top_k,
+                min_similarity=self.memory_config.min_similarity,
+            )
+
+            if not results:
+                return None
+
+            # Format results as context
+            memory_context = ["[Relevant memories from past conversations]"]
+            for r in results:
+                text = r.get("text", "")[:300]  # Limit length
+                memory_context.append(f"- {text}")
+
+            return "\n".join(memory_context)
+
+        except Exception as e:
+            logger.warning(f"Auto-recall failed: {e}")
+            return None
+
+    async def _index_conversation(
+        self,
+        session_key: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """
+        Index a conversation turn to the vector store.
+
+        Args:
+            session_key: Session identifier.
+            user_message: The user's message.
+            assistant_message: The assistant's response.
+        """
+        if not self.memory_config.enabled or not self.memory_config.index_conversations:
+            return
+
+        if not self.vector_store:
+            return
+
+        try:
+            # Create conversation turn text
+            turn_text = f"User: {user_message}\nAssistant: {assistant_message}"
+
+            metadata = {
+                "session_key": session_key,
+                "type": "conversation",
+            }
+
+            await self.vector_store.add(turn_text, metadata)
+
+            # Extract and index facts if enabled
+            if self.memory_config.extract_facts:
+                await self._extract_and_index_facts(session_key, user_message, assistant_message)
+
+        except Exception as e:
+            logger.warning(f"Failed to index conversation: {e}")
+
+    async def _extract_and_index_facts(
+        self,
+        session_key: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """Extract and index key facts from a conversation turn."""
+        try:
+            from nanobot.memory.extractor import FactExtractor
+
+            # Use extraction model or fall back to compaction model or main model
+            extraction_model = (
+                self.memory_config.extraction_model or self.compaction_config.model or self.model
+            )
+
+            extractor = FactExtractor(
+                provider=self.provider,
+                model=extraction_model,
+            )
+
+            facts = await extractor.extract_from_turn(user_message, assistant_message)
+
+            for fact in facts:
+                metadata = {
+                    "session_key": session_key,
+                    "type": "fact",
+                }
+                await self.vector_store.add(fact, metadata)
+
+            if facts:
+                logger.debug(f"Indexed {len(facts)} facts from conversation")
+
+        except Exception as e:
+            logger.warning(f"Fact extraction failed: {e}")
+
+    def _init_memory(self) -> None:
+        """Initialize semantic memory system."""
+        if not self.memory_config.enabled:
+            return
+
+        try:
+            from nanobot.agent.tools.memory_search import MemorySearchTool
+            from nanobot.llm.embeddings import EmbeddingService
+            from nanobot.memory.vectors import VectorStore
+
+            # Create embedding service
+            embedding_service = EmbeddingService(
+                model=self.memory_config.embedding_model,
+                api_key=self.api_key,
+            )
+
+            # Create vector store
+            self.vector_store = VectorStore(
+                db_path=self.memory_config.db_path,
+                embedding_service=embedding_service,
+            )
+
+            # Register memory search tool
+            self.tools.register(MemorySearchTool(self.vector_store))
+
+            logger.info(
+                f"Memory initialized: {self.vector_store.count()} entries, "
+                f"model={self.memory_config.embedding_model}"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to initialize memory: {e}")
+            self.vector_store = None
 
     async def _init_mcp(self) -> None:
         """Initialize MCP manager and register MCP tools."""
