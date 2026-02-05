@@ -6,15 +6,13 @@
     <a href="https://pepy.tech/project/nanobot-ai"><img src="https://static.pepy.tech/badge/nanobot-ai" alt="Downloads"></a>
     <img src="https://img.shields.io/badge/python-≥3.11-blue" alt="Python">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="License">
-    <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/Feishu-Group-E9DBFC?style=flat&logo=feishu&logoColor=white" alt="Feishu"></a>
-    <a href="./COMMUNICATION.md"><img src="https://img.shields.io/badge/WeChat-Group-C5EAB4?style=flat&logo=wechat&logoColor=white" alt="WeChat"></a>
     <a href="https://discord.gg/MnCvHqpUGB"><img src="https://img.shields.io/badge/Discord-Community-5865F2?style=flat&logo=discord&logoColor=white" alt="Discord"></a>
   </p>
 </div>
 
 🐈 **nanobot** is an **ultra-lightweight** personal AI assistant inspired by [Clawdbot](https://github.com/openclaw/openclaw) 
 
-⚡️ Delivers core agent functionality in just **~4,000** lines of code — **99% smaller** than Clawdbot's 430k+ lines.
+⚡️ Delivers core agent functionality in just **~7,600** lines of code — **98% smaller** than Clawdbot's 430k+ lines.
 
 ## 📢 News
 
@@ -22,7 +20,7 @@
 
 ## Key Features of nanobot:
 
-🪶 **Ultra-Lightweight**: Just ~4,000 lines of code — 99% smaller than Clawdbot - core functionality.
+🪶 **Ultra-Lightweight**: Just ~7,600 lines of code — 98% smaller than Clawdbot - core functionality.
 
 🔬 **Research-Ready**: Clean, readable code that's easy to understand, modify, and extend for research.
 
@@ -166,11 +164,12 @@ nanobot agent -m "Hello from my local LLM!"
 
 ## 💬 Chat Apps
 
-Talk to your nanobot through Telegram, WhatsApp, or Feishu — anytime, anywhere.
+Talk to your nanobot through Telegram, WhatsApp, Discord, or Feishu — anytime, anywhere.
 
 | Channel | Setup |
 |---------|-------|
 | **Telegram** | Easy (just a token) |
+| **Discord** | Easy (just a token) |
 | **WhatsApp** | Medium (scan QR) |
 | **Feishu** | Medium (app credentials) |
 
@@ -207,9 +206,50 @@ nanobot gateway
 </details>
 
 <details>
+<summary><b>Discord</b></summary>
+
+**1. Create a bot**
+- Go to [Discord Developer Portal](https://discord.com/developers/applications)
+- Create a new application → Add a bot
+- Enable **Message Content Intent** under Bot settings
+- Copy the bot token
+
+**2. Invite the bot**
+- Go to OAuth2 → URL Generator
+- Select `bot` scope with permissions: Send Messages, Read Message History
+- Use the generated URL to invite the bot to your server
+
+**3. Configure**
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "YOUR_BOT_TOKEN",
+      "guildId": "YOUR_SERVER_ID",
+      "defaultChannelId": "CHANNEL_ID_FOR_NOTIFICATIONS",
+      "triggerWord": "nano",
+      "allowFrom": ["YOUR_USER_ID"]
+    }
+  }
+}
+```
+
+> The bot responds to DMs and messages containing the `triggerWord`. Get IDs by enabling Developer Mode in Discord settings.
+
+**4. Run**
+
+```bash
+nanobot gateway
+```
+
+</details>
+
+<details>
 <summary><b>WhatsApp</b></summary>
 
-Requires **Node.js ≥18**.
+Requires **Node.js ≥20**.
 
 **1. Link device**
 
@@ -308,6 +348,8 @@ Config file: `~/.nanobot/config.json`
 | `openai` | LLM (GPT direct) | [platform.openai.com](https://platform.openai.com) |
 | `groq` | LLM + **Voice transcription** (Whisper) | [console.groq.com](https://console.groq.com) |
 | `gemini` | LLM (Gemini direct) | [aistudio.google.com](https://aistudio.google.com) |
+| `zhipu` | LLM (GLM models, China) | [open.bigmodel.cn](https://open.bigmodel.cn) |
+| `vllm` | Local models (OpenAI-compatible) | See [Local Models](#-local-models-vllm) |
 
 
 <details>
@@ -336,6 +378,14 @@ Config file: `~/.nanobot/config.json`
     },
     "whatsapp": {
       "enabled": false
+    },
+    "discord": {
+      "enabled": false,
+      "token": "YOUR_BOT_TOKEN",
+      "guildId": "SERVER_ID",
+      "defaultChannelId": "CHANNEL_ID",
+      "triggerWord": "nano",
+      "allowFrom": []
     },
     "feishu": {
       "enabled": false,
@@ -374,14 +424,19 @@ Config file: `~/.nanobot/config.json`
 <summary><b>Scheduled Tasks (Cron)</b></summary>
 
 ```bash
-# Add a job
+# Add a job (three modes: cron expression, interval, or one-time)
 nanobot cron add --name "daily" --message "Good morning!" --cron "0 9 * * *"
 nanobot cron add --name "hourly" --message "Check status" --every 3600
+nanobot cron add --name "reminder" --message "Meeting!" --at "2026-02-05T09:00:00"
 
 # List jobs
 nanobot cron list
+nanobot cron list --all  # Include disabled jobs
 
-# Remove a job
+# Manage jobs
+nanobot cron enable <job_id>
+nanobot cron disable <job_id>
+nanobot cron run <job_id>        # Run immediately
 nanobot cron remove <job_id>
 ```
 
@@ -404,7 +459,7 @@ docker run -v ~/.nanobot:/root/.nanobot --rm nanobot onboard
 # Edit config on host to add API keys
 vim ~/.nanobot/config.json
 
-# Run gateway (connects to Telegram/WhatsApp)
+# Run gateway (connects to chat channels)
 docker run -v ~/.nanobot:/root/.nanobot -p 18790:18790 nanobot gateway
 
 # Or run a single command
@@ -422,13 +477,14 @@ nanobot/
 │   ├── memory.py   #    Persistent memory
 │   ├── skills.py   #    Skills loader
 │   ├── subagent.py #    Background task execution
-│   └── tools/      #    Built-in tools (incl. spawn)
-├── skills/         # 🎯 Bundled skills (github, weather, tmux...)
-├── channels/       # 📱 WhatsApp integration
+│   └── tools/      #    Built-in tools (exec, web, files, spawn, cron...)
+├── skills/         # 🎯 Bundled skills (github, weather, summarize, tmux...)
+├── channels/       # 📱 Chat integrations (Telegram, Discord, WhatsApp, Feishu)
 ├── bus/            # 🚌 Message routing
 ├── cron/           # ⏰ Scheduled tasks
 ├── heartbeat/      # 💓 Proactive wake-up
-├── providers/      # 🤖 LLM providers (OpenRouter, etc.)
+├── mcp/            # 🔌 Model Context Protocol support
+├── providers/      # 🤖 LLM providers (via LiteLLM)
 ├── session/        # 💬 Conversation sessions
 ├── config/         # ⚙️ Configuration
 └── cli/            # 🖥️ Commands
@@ -440,11 +496,14 @@ PRs welcome! The codebase is intentionally small and readable. 🤗
 
 **Roadmap** — Pick an item and [open a PR](https://github.com/HKUDS/nanobot/pulls)!
 
-- [x] **Voice Transcription** — Support for Groq Whisper (Issue #13)
+- [x] **Voice Transcription** — Support for Groq Whisper
+- [x] **Discord Integration** — Full Discord bot support with typing indicators and reactions
+- [x] **Scheduled Tasks** — Cron service for periodic jobs
+- [x] **MCP Support** — Model Context Protocol for extensible capabilities
 - [ ] **Multi-modal** — See and hear (images, voice, video)
 - [ ] **Long-term memory** — Never forget important context
 - [ ] **Better reasoning** — Multi-step planning and reflection
-- [ ] **More integrations** — Discord, Slack, email, calendar
+- [ ] **More integrations** — Slack, email, calendar
 - [ ] **Self-improvement** — Learn from feedback and mistakes
 
 ### Contributors
