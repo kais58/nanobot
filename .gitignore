@@ -1,5 +1,6 @@
 .assets
 .env
+uv.lock
 *.pyc
 dist/
 build/

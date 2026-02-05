@@ -15,21 +15,22 @@ def get_config_path() -> Path:
 def get_data_dir() -> Path:
     """Get the nanobot data directory."""
     from nanobot.utils.helpers import get_data_path
+
     return get_data_path()
 
 
 def load_config(config_path: Path | None = None) -> Config:
     """
     Load configuration from file or create default.
-    
+
     Args:
         config_path: Optional path to config file. Uses default if not provided.
-    
+
     Returns:
         Loaded configuration object.
     """
     path = config_path or get_config_path()
-    
+
     if path.exists():
         try:
             with open(path) as f:
@@ -38,33 +39,41 @@ def load_config(config_path: Path | None = None) -> Config:
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
             print("Using default configuration.")
-    
+
     return Config()
 
 
 def save_config(config: Config, config_path: Path | None = None) -> None:
     """
     Save configuration to file.
-    
+
     Args:
         config: Configuration to save.
         config_path: Optional path to save to. Uses default if not provided.
     """
     path = config_path or get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Convert to camelCase format
     data = config.model_dump()
     data = convert_to_camel(data)
-    
+
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
 
 
-def convert_keys(data: Any) -> Any:
-    """Convert camelCase keys to snake_case for Pydantic."""
+def convert_keys(data: Any, preserve_key: str | None = None) -> Any:
+    """Convert camelCase keys to snake_case for Pydantic.
+
+    Args:
+        data: The data to convert.
+        preserve_key: If the current dict was accessed via this key, preserve its keys.
+    """
     if isinstance(data, dict):
-        return {camel_to_snake(k): convert_keys(v) for k, v in data.items()}
+        # Don't convert keys inside 'env' dicts (environment variables should stay as-is)
+        if preserve_key == "env":
+            return {k: convert_keys(v) for k, v in data.items()}
+        return {camel_to_snake(k): convert_keys(v, preserve_key=k) for k, v in data.items()}
     if isinstance(data, list):
         return [convert_keys(item) for item in data]
     return data
