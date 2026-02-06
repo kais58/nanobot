@@ -45,6 +45,7 @@ jobs:
 
           ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" bash -s <<'DEPLOY_SCRIPT'
             set -euo pipefail
+            export PATH="/usr/local/bin:$PATH"
             cd /Users/mtaap-macstudio/nanobot
 
             echo "=== Pulling latest code ==="
