@@ -149,6 +149,12 @@ def process(self, data: str | None = None) -> dict[str, Any]:
 5. **Prove correctness**: Demonstrate that changes work with tests or examples
 6. **Use subagents**: For multi-file exploration or complex refactoring
 
+## GitHub
+
+This is a fork of `HKUDS/nanobot`. PRs must target **MTAAP/nanobot**, not the upstream.
+
+After cloning, run once: `gh repo set-default MTAAP/nanobot`
+
 ## Mistakes to Avoid
 
 - Forgetting `encoding="utf-8"` on file operations
@@ -157,3 +163,4 @@ def process(self, data: str | None = None) -> dict[str, Any]:
 - Leaving emoji in debug/log messages
 - Implementing features without clarifying requirements first
 - Assuming user intent instead of asking
+- Creating PRs against the upstream `HKUDS/nanobot` instead of `MTAAP/nanobot`
