@@ -4,6 +4,8 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from loguru import logger
+
 from nanobot.agent.tools.base import Tool
 
 if TYPE_CHECKING:
@@ -21,8 +23,9 @@ class CronTool(Tool):
     MAX_JOBS = 50
     MIN_INTERVAL_SECONDS = 60
 
-    def __init__(self, cron_service: "CronService"):
+    def __init__(self, cron_service: "CronService", vector_store: Any = None):
         self._service = cron_service
+        self._vector_store = vector_store
         self._context_channel: str | None = None
         self._context_chat_id: str | None = None
 
@@ -145,7 +148,7 @@ class CronTool(Tool):
                     to=to,
                 )
             elif action == "remove":
-                return self._remove_job(job_id)
+                return await self._remove_job(job_id)
             elif action == "enable":
                 return self._toggle_job(job_id, enabled=True)
             elif action == "disable":
@@ -303,14 +306,24 @@ class CronTool(Tool):
 
         return f"Created job '{name}' (ID: {job.id}) scheduled {sched_desc}{delivery_info}"
 
-    def _remove_job(self, job_id: str | None) -> str:
-        """Remove a job by ID."""
+    async def _remove_job(self, job_id: str | None) -> str:
+        """Remove a job by ID and clean up associated vector store entries."""
         if not job_id:
             return "Error: 'job_id' is required for remove action"
 
-        if self._service.remove_job(job_id):
-            return f"Removed job {job_id}"
-        return f"Error: Job '{job_id}' not found"
+        job = self._service.remove_job(job_id)
+        if not job:
+            return f"Error: Job '{job_id}' not found"
+
+        # Clean up vector store entries referencing this job
+        if self._vector_store and job.payload.message:
+            try:
+                await self._vector_store.delete_by_query(job.name, min_similarity=0.75)
+                await self._vector_store.delete_by_query(job.payload.message, min_similarity=0.75)
+            except Exception as e:
+                logger.debug(f"Vector cleanup after cron removal failed: {e}")
+
+        return f"Removed job {job_id}"
 
     def _toggle_job(self, job_id: str | None, enabled: bool) -> str:
         """Enable or disable a job."""

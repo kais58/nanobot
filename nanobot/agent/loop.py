@@ -399,6 +399,14 @@ class AgentLoop:
         # Initialize memory if enabled
         self._init_memory()
 
+        # Wire vector store into cron tool for cleanup on job removal
+        if self.cron_service and self.vector_store:
+            from nanobot.agent.tools.cron import CronTool
+
+            cron_tool = self.tools.get("cron")
+            if isinstance(cron_tool, CronTool):
+                cron_tool._vector_store = self.vector_store
+
         # Initialize memory extraction pipeline
         self._init_extraction()
 
@@ -944,8 +952,10 @@ class AgentLoop:
             if entities:
                 logger.debug(f"Extracted {len(entities)} entities from conversation")
 
-        except (json.JSONDecodeError, Exception) as e:
-            logger.debug(f"Entity extraction failed: {e}")
+        except json.JSONDecodeError as e:
+            logger.debug(f"Entity extraction JSON parse failed: {e}")
+        except Exception as e:
+            logger.warning(f"Entity extraction failed: {e}")
 
     def _init_memory(self) -> None:
         """Initialize semantic memory system."""

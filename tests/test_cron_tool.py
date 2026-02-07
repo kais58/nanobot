@@ -223,6 +223,64 @@ class TestRemove:
         assert "Error" in result
         assert "not found" in result
 
+    @pytest.mark.asyncio
+    async def test_remove_job_returns_cronjob(self, cron_service: CronService) -> None:
+        """CronService.remove_job returns the removed CronJob."""
+        job = cron_service.add_job(
+            name="return-test",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="Check return value",
+        )
+
+        removed = cron_service.remove_job(job.id)
+        assert removed is not None
+        assert removed.id == job.id
+        assert removed.name == "return-test"
+
+    @pytest.mark.asyncio
+    async def test_remove_job_returns_none_for_missing(self, cron_service: CronService) -> None:
+        """CronService.remove_job returns None when job not found."""
+        removed = cron_service.remove_job("nonexistent")
+        assert removed is None
+
+    @pytest.mark.asyncio
+    async def test_remove_cleans_up_vector_store(self, cron_service: CronService) -> None:
+        """Removing a job triggers vector store cleanup."""
+        mock_vector_store = AsyncMock()
+        mock_vector_store.delete_by_query = AsyncMock(return_value=0)
+
+        tool = CronTool(cron_service=cron_service, vector_store=mock_vector_store)
+
+        job = cron_service.add_job(
+            name="daily-reminder",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="Remind me to check email",
+        )
+
+        result = await tool.execute(action="remove", job_id=job.id)
+        assert "Removed" in result
+
+        # Vector store should have been called with the job name and message
+        assert mock_vector_store.delete_by_query.call_count == 2
+        calls = [c.args[0] for c in mock_vector_store.delete_by_query.call_args_list]
+        assert "daily-reminder" in calls
+        assert "Remind me to check email" in calls
+
+    @pytest.mark.asyncio
+    async def test_remove_without_vector_store_still_works(
+        self, cron_tool: CronTool, cron_service: CronService
+    ) -> None:
+        """Remove works normally when no vector store is provided."""
+        job = cron_service.add_job(
+            name="no-vector",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="No vector store",
+        )
+
+        result = await cron_tool.execute(action="remove", job_id=job.id)
+        assert "Removed" in result
+        assert len(cron_service.list_jobs(include_disabled=True)) == 0
+
 
 class TestEnableDisable:
     """Tests for enable/disable actions."""

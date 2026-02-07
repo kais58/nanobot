@@ -1,5 +1,6 @@
 """Proactive memory surfacing and interaction pattern learning."""
 
+import hashlib
 import json
 import re
 from datetime import datetime, timedelta
@@ -53,6 +54,7 @@ class ProactiveMemory:
         ensure_dir(self._data_dir)
 
         self._patterns_path = self._data_dir / "patterns.json"
+        self._dismissed_path = self._data_dir / "dismissed.json"
         self._commitment_re = re.compile(
             "|".join(self._COMMITMENT_PATTERNS),
             re.IGNORECASE,
@@ -90,10 +92,15 @@ class ProactiveMemory:
         reminders: list[str] = []
         now = datetime.now()
         horizon = now + timedelta(days=3)
+        dismissed = self._load_dismissed()
 
         for entry in candidates:
             text = entry.get("text", "")
             if not self._commitment_re.search(text):
+                continue
+
+            # Skip dismissed reminders
+            if self._text_hash(text) in dismissed:
                 continue
 
             # Check if the memory references a date in the near future
@@ -102,6 +109,17 @@ class ProactiveMemory:
 
         logger.debug(f"Found {len(reminders)} proactive reminders")
         return reminders
+
+    def dismiss_reminder(self, text: str) -> None:
+        """Dismiss a reminder so it won't be surfaced again.
+
+        Args:
+            text: The reminder text to dismiss.
+        """
+        dismissed = self._load_dismissed()
+        dismissed.add(self._text_hash(text))
+        self._save_dismissed(dismissed)
+        logger.debug(f"Dismissed reminder: {text[:80]}")
 
     def _is_within_horizon(
         self,
@@ -255,3 +273,30 @@ class ProactiveMemory:
             )
         except OSError as e:
             logger.error(f"Failed to save patterns: {e}")
+
+    @staticmethod
+    def _text_hash(text: str) -> str:
+        """Return a stable hash for reminder text."""
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+    def _load_dismissed(self) -> set[str]:
+        """Load dismissed reminder hashes from disk."""
+        if not self._dismissed_path.exists():
+            return set()
+        try:
+            data = self._dismissed_path.read_text(encoding="utf-8")
+            items = json.loads(data) if data.strip() else []
+            return set(items)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error(f"Failed to load dismissed reminders: {e}")
+            return set()
+
+    def _save_dismissed(self, dismissed: set[str]) -> None:
+        """Save dismissed reminder hashes to disk."""
+        try:
+            self._dismissed_path.write_text(
+                json.dumps(sorted(dismissed), ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.error(f"Failed to save dismissed reminders: {e}")
