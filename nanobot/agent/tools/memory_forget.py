@@ -7,7 +7,7 @@ from loguru import logger
 from nanobot.agent.tools.base import Tool
 
 # Maximum deletions allowed per tool instance (per conversation)
-MAX_DELETIONS_PER_SESSION = 5
+MAX_DELETIONS_PER_SESSION = 10
 
 
 class MemoryForgetTool(Tool):
@@ -41,7 +41,7 @@ class MemoryForgetTool(Tool):
             "the user asks you to forget something or when incorrect "
             "information was stored. Set confirm=false first to preview "
             "what would be deleted, then confirm=true to execute. "
-            "Limited to 5 deletions per conversation."
+            "Limited to 10 deletions per conversation."
         )
 
     @property
@@ -89,8 +89,8 @@ class MemoryForgetTool(Tool):
             # Search for matching memories
             results = await self._vector_store.search(
                 query=query,
-                top_k=3,
-                min_similarity=0.7,
+                top_k=8,
+                min_similarity=0.6,
             )
 
             if not results:
