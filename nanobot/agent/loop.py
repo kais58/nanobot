@@ -908,6 +908,9 @@ class AgentLoop:
             )
 
             content = (response.content or "").strip()
+            if not content:
+                logger.debug("Entity extraction returned empty response")
+                return
 
             # Handle markdown code blocks
             if content.startswith("```"):
