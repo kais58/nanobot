@@ -1,13 +1,15 @@
 """Memory forget tool for removing specific memories from the vector store."""
 
+import time
 from typing import Any
 
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool
 
-# Maximum deletions allowed per tool instance (per conversation)
-MAX_DELETIONS_PER_SESSION = 10
+# Rate limit: max deletions within a sliding time window
+MAX_DELETIONS_PER_WINDOW = 20
+WINDOW_SECONDS = 1800  # 30 minutes
 
 
 class MemoryForgetTool(Tool):
@@ -15,7 +17,7 @@ class MemoryForgetTool(Tool):
     Remove specific memories from the vector store.
 
     Use when the user asks to forget something or when incorrect
-    information was stored. Limited to 5 deletions per conversation.
+    information was stored. Rate-limited to 20 deletions per 30 minutes.
     Supports a preview mode (confirm=False) to show what would be
     deleted before actually deleting.
     """
@@ -28,7 +30,7 @@ class MemoryForgetTool(Tool):
             vector_store: VectorStore instance with search and delete methods.
         """
         self._vector_store = vector_store
-        self._deletion_count = 0
+        self._deletion_timestamps: list[float] = []
 
     @property
     def name(self) -> str:
@@ -41,7 +43,7 @@ class MemoryForgetTool(Tool):
             "the user asks you to forget something or when incorrect "
             "information was stored. Set confirm=false first to preview "
             "what would be deleted, then confirm=true to execute. "
-            "Limited to 10 deletions per conversation."
+            "Rate-limited to 20 deletions per 30 minutes."
         )
 
     @property
@@ -67,6 +69,16 @@ class MemoryForgetTool(Tool):
             "required": ["query", "confirm"],
         }
 
+    def _prune_old_timestamps(self) -> None:
+        """Remove deletion timestamps older than the rate-limit window."""
+        cutoff = time.monotonic() - WINDOW_SECONDS
+        self._deletion_timestamps = [ts for ts in self._deletion_timestamps if ts > cutoff]
+
+    def _remaining_deletions(self) -> int:
+        """Return how many deletions are allowed in the current window."""
+        self._prune_old_timestamps()
+        return MAX_DELETIONS_PER_WINDOW - len(self._deletion_timestamps)
+
     async def execute(self, **kwargs: Any) -> str:
         """Execute the memory forget operation."""
         query = kwargs.get("query", "")
@@ -78,11 +90,17 @@ class MemoryForgetTool(Tool):
         if self._vector_store is None:
             return "Memory forget is not available (vector store not initialized)."
 
-        if self._deletion_count >= MAX_DELETIONS_PER_SESSION:
+        remaining = self._remaining_deletions()
+        if remaining <= 0:
+            # Find when the oldest deletion in the window expires
+            oldest = min(self._deletion_timestamps)
+            reset_at = oldest + WINDOW_SECONDS
+            seconds_left = int(reset_at - time.monotonic())
+            minutes_left = max(1, (seconds_left + 59) // 60)
             return (
-                f"Deletion limit reached ({MAX_DELETIONS_PER_SESSION} "
-                f"per conversation). Cannot delete more memories in "
-                f"this session."
+                f"Deletion rate limit reached ({MAX_DELETIONS_PER_WINDOW} "
+                f"per {WINDOW_SECONDS // 60} minutes). "
+                f"Try again in ~{minutes_left} minute(s)."
             )
 
         try:
@@ -112,28 +130,29 @@ class MemoryForgetTool(Tool):
                 lines.append("Call again with confirm=true to delete these memories.")
                 return "\n".join(lines)
 
-            # Deletion mode
+            # Deletion mode — cap by remaining quota
             deleted = 0
             for result in results:
+                if self._remaining_deletions() <= 0:
+                    break
                 entry_id = result.get("id")
                 if entry_id is None:
                     continue
                 try:
                     if await self._vector_store.delete(entry_id):
                         deleted += 1
+                        self._deletion_timestamps.append(time.monotonic())
                 except Exception as e:
                     logger.warning(f"Failed to delete memory entry: {e}")
 
-            self._deletion_count += deleted
-            remaining = MAX_DELETIONS_PER_SESSION - self._deletion_count
+            remaining = self._remaining_deletions()
 
             logger.debug(
                 f"Deleted {deleted} memories for query '{query}', "
-                f"{remaining} deletions remaining this session"
+                f"{remaining} deletions remaining in window"
             )
             return (
-                f"Deleted {deleted} memories matching: {query}. "
-                f"Remaining deletions this session: {remaining}."
+                f"Deleted {deleted} memories matching: {query}. Remaining deletions: {remaining}."
             )
 
         except Exception as e:
