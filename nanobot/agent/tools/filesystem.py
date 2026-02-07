@@ -6,8 +6,25 @@ from typing import Any
 from nanobot.agent.tools.base import Tool
 
 
+def _check_allowed_dir(file_path: Path, allowed_dir: Path | None) -> str | None:
+    """Return an error string if file_path is outside allowed_dir, else None."""
+    if allowed_dir is None:
+        return None
+    try:
+        resolved = file_path.resolve()
+        allowed = allowed_dir.resolve()
+        if allowed not in resolved.parents and resolved != allowed:
+            return f"Error: Path '{file_path}' is outside the allowed directory"
+    except Exception:
+        pass
+    return None
+
+
 class ReadFileTool(Tool):
     """Tool to read file contents."""
+
+    def __init__(self, allowed_dir: Path | None = None):
+        self.allowed_dir = allowed_dir
 
     @property
     def name(self) -> str:
@@ -28,6 +45,11 @@ class ReadFileTool(Tool):
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
             file_path = Path(path).expanduser()
+
+            err = _check_allowed_dir(file_path, self.allowed_dir)
+            if err:
+                return err
+
             if not file_path.exists():
                 return f"Error: File not found: {path}"
             if not file_path.is_file():
@@ -43,6 +65,9 @@ class ReadFileTool(Tool):
 
 class WriteFileTool(Tool):
     """Tool to write content to a file."""
+
+    def __init__(self, allowed_dir: Path | None = None):
+        self.allowed_dir = allowed_dir
 
     @property
     def name(self) -> str:
@@ -66,6 +91,11 @@ class WriteFileTool(Tool):
     async def execute(self, path: str, content: str, **kwargs: Any) -> str:
         try:
             file_path = Path(path).expanduser()
+
+            err = _check_allowed_dir(file_path, self.allowed_dir)
+            if err:
+                return err
+
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_text(content, encoding="utf-8")
             return f"Successfully wrote {len(content)} bytes to {path}"
@@ -78,13 +108,19 @@ class WriteFileTool(Tool):
 class EditFileTool(Tool):
     """Tool to edit a file by replacing text."""
 
+    def __init__(self, allowed_dir: Path | None = None):
+        self.allowed_dir = allowed_dir
+
     @property
     def name(self) -> str:
         return "edit_file"
 
     @property
     def description(self) -> str:
-        return "Edit a file by replacing old_text with new_text. The old_text must exist exactly in the file."
+        return (
+            "Edit a file by replacing old_text with new_text. "
+            "The old_text must exist exactly in the file."
+        )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -92,7 +128,10 @@ class EditFileTool(Tool):
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "The file path to edit"},
-                "old_text": {"type": "string", "description": "The exact text to find and replace"},
+                "old_text": {
+                    "type": "string",
+                    "description": "The exact text to find and replace",
+                },
                 "new_text": {"type": "string", "description": "The text to replace with"},
             },
             "required": ["path", "old_text", "new_text"],
@@ -101,6 +140,11 @@ class EditFileTool(Tool):
     async def execute(self, path: str, old_text: str, new_text: str, **kwargs: Any) -> str:
         try:
             file_path = Path(path).expanduser()
+
+            err = _check_allowed_dir(file_path, self.allowed_dir)
+            if err:
+                return err
+
             if not file_path.exists():
                 return f"Error: File not found: {path}"
 
@@ -112,7 +156,10 @@ class EditFileTool(Tool):
             # Count occurrences
             count = content.count(old_text)
             if count > 1:
-                return f"Warning: old_text appears {count} times. Please provide more context to make it unique."
+                return (
+                    f"Warning: old_text appears {count} times. "
+                    "Please provide more context to make it unique."
+                )
 
             new_content = content.replace(old_text, new_text, 1)
             file_path.write_text(new_content, encoding="utf-8")
@@ -127,6 +174,9 @@ class EditFileTool(Tool):
 class ListDirTool(Tool):
     """Tool to list directory contents."""
 
+    def __init__(self, allowed_dir: Path | None = None):
+        self.allowed_dir = allowed_dir
+
     @property
     def name(self) -> str:
         return "list_dir"
@@ -139,13 +189,20 @@ class ListDirTool(Tool):
     def parameters(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"path": {"type": "string", "description": "The directory path to list"}},
+            "properties": {
+                "path": {"type": "string", "description": "The directory path to list"},
+            },
             "required": ["path"],
         }
 
     async def execute(self, path: str, **kwargs: Any) -> str:
         try:
             dir_path = Path(path).expanduser()
+
+            err = _check_allowed_dir(dir_path, self.allowed_dir)
+            if err:
+                return err
+
             if not dir_path.exists():
                 return f"Error: Directory not found: {path}"
             if not dir_path.is_dir():
@@ -153,7 +210,7 @@ class ListDirTool(Tool):
 
             items = []
             for item in sorted(dir_path.iterdir()):
-                prefix = "📁 " if item.is_dir() else "📄 "
+                prefix = "d " if item.is_dir() else "f "
                 items.append(f"{prefix}{item.name}")
 
             if not items:

@@ -89,6 +89,7 @@ class AgentLoop:
         memory_config: "MemoryConfig | None" = None,
         provider_resolver: "ProviderResolver | None" = None,
         memory_extraction: "MemoryExtractionConfig | None" = None,
+        restrict_to_workspace: bool = False,
         registry: "AgentRegistry | None" = None,
         daemon_config: "DaemonConfig | None" = None,
     ):
@@ -114,6 +115,9 @@ class AgentLoop:
         self.compaction_config = compaction_config or CompactionConfig()
         self.memory_config = memory_config or MemoryConfig()
         self.provider_resolver = provider_resolver
+
+        # Tools-level workspace restriction (applies to file tools and exec)
+        self.restrict_to_workspace = restrict_to_workspace or self.exec_config.restrict_to_workspace
 
         # Memory extraction config
         from nanobot.config.schema import MemoryExtractionConfig
@@ -180,18 +184,21 @@ class AgentLoop:
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
+        # Compute allowed_dir for file tools when workspace restriction is active
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
+
         # File tools
-        self.tools.register(ReadFileTool())
-        self.tools.register(WriteFileTool())
-        self.tools.register(EditFileTool())
-        self.tools.register(ListDirTool())
+        self.tools.register(ReadFileTool(allowed_dir=allowed_dir))
+        self.tools.register(WriteFileTool(allowed_dir=allowed_dir))
+        self.tools.register(EditFileTool(allowed_dir=allowed_dir))
+        self.tools.register(ListDirTool(allowed_dir=allowed_dir))
 
         # Shell tool
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
                 timeout=self.exec_config.timeout,
-                restrict_to_workspace=self.exec_config.restrict_to_workspace,
+                restrict_to_workspace=self.restrict_to_workspace,
             )
         )
 

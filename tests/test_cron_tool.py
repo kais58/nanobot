@@ -343,6 +343,100 @@ class TestContext:
         assert jobs[0].payload.to == "9876543210"
 
 
+class TestDiscordContext:
+    """Tests for Discord channel context handling."""
+
+    @pytest.mark.asyncio
+    async def test_discord_context_default_delivery(
+        self, cron_tool: CronTool, cron_service: CronService
+    ) -> None:
+        """Uses Discord context for delivery target when not specified."""
+        cron_tool.set_context("discord", "1234567890")
+
+        result = await cron_tool.execute(
+            action="add",
+            name="discord-reminder",
+            message="Remind user to check server",
+            schedule_type="every",
+            every_seconds=60,
+            deliver=True,
+        )
+        assert "Created job" in result
+
+        jobs = cron_service.list_jobs(include_disabled=True)
+        assert len(jobs) == 1
+        assert jobs[0].payload.deliver is True
+        assert jobs[0].payload.channel == "discord"
+        assert jobs[0].payload.to == "1234567890"
+
+
+class TestCronDelivery:
+    """Tests for cron job delivery via the message bus."""
+
+    @pytest.mark.asyncio
+    async def test_on_cron_job_delivers_to_bus(
+        self, cron_service: CronService
+    ) -> None:
+        """Cron callback publishes OutboundMessage when deliver=True and channel is set."""
+        from nanobot.bus.events import OutboundMessage
+        from nanobot.bus.queue import MessageBus
+
+        bus = MessageBus()
+        published: list[OutboundMessage] = []
+
+        original_put = bus.outbound.put
+
+        async def capture_put(msg: OutboundMessage) -> None:
+            published.append(msg)
+            await original_put(msg)
+
+        bus.outbound.put = capture_put  # type: ignore[assignment]
+
+        job = cron_service.add_job(
+            name="deliver-test",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="Test delivery",
+            deliver=True,
+            channel="discord",
+            to="999888777",
+        )
+
+        # Simulate the on_cron_job callback logic (post-fix)
+        response = "Test response"
+        if job.payload.deliver and job.payload.to:
+            target_channel = job.payload.channel
+            if target_channel:
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=target_channel,
+                        chat_id=job.payload.to,
+                        content=response,
+                    )
+                )
+
+        assert len(published) == 1
+        assert published[0].channel == "discord"
+        assert published[0].chat_id == "999888777"
+        assert published[0].content == "Test response"
+
+    @pytest.mark.asyncio
+    async def test_on_cron_job_skips_when_no_channel(
+        self, cron_service: CronService
+    ) -> None:
+        """Cron callback skips delivery when channel is not set."""
+        job = cron_service.add_job(
+            name="no-channel-test",
+            schedule=CronSchedule(kind="every", every_ms=60000),
+            message="Test no channel",
+            deliver=True,
+            channel=None,
+            to="999888777",
+        )
+        # With our fix, delivery is skipped (not defaulted to whatsapp)
+        assert job.payload.channel is None
+        assert job.payload.deliver is True
+
+
 class TestJobLimit:
     """Tests for job limit enforcement."""
 

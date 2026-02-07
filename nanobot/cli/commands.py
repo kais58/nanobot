@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import typer
+from loguru import logger
 from rich.console import Console
 from rich.table import Table
 
@@ -181,7 +182,7 @@ def gateway(
     from nanobot.providers.resolver import ProviderResolver
 
     resolver = ProviderResolver(config.providers, config.agents.defaults.provider)
-    api_key, api_base = resolver.resolve()
+    api_key, api_base, extra_headers = resolver.resolve_with_headers()
     model = config.agents.defaults.model
     is_bedrock = model.startswith("bedrock/")
 
@@ -191,7 +192,10 @@ def gateway(
         raise typer.Exit(1)
 
     provider = LiteLLMProvider(
-        api_key=api_key, api_base=api_base, default_model=config.agents.defaults.model
+        api_key=api_key,
+        api_base=api_base,
+        default_model=config.agents.defaults.model,
+        extra_headers=extra_headers,
     )
 
     # Create channel manager first (needed for agent tools)
@@ -228,6 +232,7 @@ def gateway(
         memory_config=config.agents.defaults.memory,
         provider_resolver=resolver,
         memory_extraction=config.agents.defaults.memory_extraction,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
         registry=registry,
         daemon_config=daemon_cfg,
     )
@@ -238,15 +243,21 @@ def gateway(
         response = await agent.process_direct(job.payload.message, session_key=f"cron:{job.id}")
         # Optionally deliver to channel
         if job.payload.deliver and job.payload.to:
-            from nanobot.bus.events import OutboundMessage
-
-            await bus.publish_outbound(
-                OutboundMessage(
-                    channel=job.payload.channel or "whatsapp",
-                    chat_id=job.payload.to,
-                    content=response or "",
+            target_channel = job.payload.channel
+            if not target_channel:
+                logger.warning(
+                    f"Cron job '{job.name}' has deliver=True but no channel set, skipping delivery"
                 )
-            )
+            else:
+                from nanobot.bus.events import OutboundMessage
+
+                await bus.publish_outbound(
+                    OutboundMessage(
+                        channel=target_channel,
+                        chat_id=job.payload.to,
+                        content=response or "",
+                    )
+                )
         return response
 
     cron.on_job = on_cron_job
@@ -369,7 +380,7 @@ def agent(
     from nanobot.providers.resolver import ProviderResolver
 
     resolver = ProviderResolver(config.providers, config.agents.defaults.provider)
-    api_key, api_base = resolver.resolve()
+    api_key, api_base, extra_headers = resolver.resolve_with_headers()
     model = config.agents.defaults.model
     is_bedrock = model.startswith("bedrock/")
 
@@ -379,7 +390,10 @@ def agent(
 
     bus = MessageBus()
     provider = LiteLLMProvider(
-        api_key=api_key, api_base=api_base, default_model=config.agents.defaults.model
+        api_key=api_key,
+        api_base=api_base,
+        default_model=config.agents.defaults.model,
+        extra_headers=extra_headers,
     )
 
     agent_loop = AgentLoop(
@@ -393,6 +407,7 @@ def agent(
         memory_config=config.agents.defaults.memory,
         provider_resolver=resolver,
         memory_extraction=config.agents.defaults.memory_extraction,
+        restrict_to_workspace=config.tools.restrict_to_workspace,
     )
 
     if message:
@@ -1097,25 +1112,23 @@ def status():
         console.print(f"Model: {config.agents.defaults.model}")
 
         # Check API keys
-        has_openrouter = bool(config.providers.openrouter.api_key)
-        has_anthropic = bool(config.providers.anthropic.api_key)
-        has_openai = bool(config.providers.openai.api_key)
-        has_gemini = bool(config.providers.gemini.api_key)
-        has_vllm = bool(config.providers.vllm.api_base)
+        p = config.providers
+        providers_status = [
+            ("OpenRouter", bool(p.openrouter.api_key)),
+            ("Anthropic", bool(p.anthropic.api_key)),
+            ("OpenAI", bool(p.openai.api_key)),
+            ("Gemini", bool(p.gemini.api_key)),
+            ("DeepSeek", bool(p.deepseek.api_key)),
+            ("DashScope", bool(p.dashscope.api_key)),
+            ("Moonshot", bool(p.moonshot.api_key)),
+            ("AiHubMix", bool(p.aihubmix.api_key)),
+        ]
+        for name, has_key in providers_status:
+            status = "[green]✓[/green]" if has_key else "[dim]not set[/dim]"
+            console.print(f"{name} API: {status}")
 
-        console.print(
-            f"OpenRouter API: {'[green]✓[/green]' if has_openrouter else '[dim]not set[/dim]'}"
-        )
-        console.print(
-            f"Anthropic API: {'[green]✓[/green]' if has_anthropic else '[dim]not set[/dim]'}"
-        )
-        console.print(f"OpenAI API: {'[green]✓[/green]' if has_openai else '[dim]not set[/dim]'}")
-        console.print(f"Gemini API: {'[green]✓[/green]' if has_gemini else '[dim]not set[/dim]'}")
-        vllm_status = (
-            f"[green]✓ {config.providers.vllm.api_base}[/green]"
-            if has_vllm
-            else "[dim]not set[/dim]"
-        )
+        has_vllm = bool(p.vllm.api_base)
+        vllm_status = f"[green]✓ {p.vllm.api_base}[/green]" if has_vllm else "[dim]not set[/dim]"
         console.print(f"vLLM/Local: {vllm_status}")
 
 

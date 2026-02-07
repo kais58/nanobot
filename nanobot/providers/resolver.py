@@ -7,11 +7,12 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from nanobot.config.schema import ProvidersConfig
+    from nanobot.config.schema import ProviderConfig, ProvidersConfig
 
 # Known provider API bases (applied when no explicit api_base is set)
 _DEFAULT_API_BASES: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
+    "aihubmix": "https://aihubmix.com/v1",
 }
 
 
@@ -37,7 +38,10 @@ class ProviderResolver:
         self.providers = providers
         self.default_provider = default_provider
 
-    def resolve(self, name: str | None = None) -> tuple[str | None, str | None]:
+    def resolve(
+        self,
+        name: str | None = None,
+    ) -> tuple[str | None, str | None]:
         """Return (api_key, api_base) for a named or default provider.
 
         Resolution chain:
@@ -66,6 +70,30 @@ class ProviderResolver:
         # Fallback: priority-based scanning (matches Config.get_api_key order)
         return self._fallback_resolve()
 
+    def resolve_with_headers(
+        self,
+        name: str | None = None,
+    ) -> tuple[str | None, str | None, dict[str, str] | None]:
+        """Like resolve() but also returns extra_headers from the provider config.
+
+        Returns:
+            Tuple of (api_key, api_base, extra_headers).
+        """
+        for target in (name, self.default_provider):
+            if not target:
+                continue
+            provider: ProviderConfig | None = getattr(self.providers, target, None)
+            if provider and provider.api_key:
+                api_base = provider.api_base
+                if target in _DEFAULT_API_BASES and not api_base:
+                    api_base = _DEFAULT_API_BASES[target]
+                logger.debug(f"Resolved provider '{target}' (with headers)")
+                return provider.api_key, api_base, provider.extra_headers
+
+        # Fallback
+        api_key, api_base = self._fallback_resolve()
+        return api_key, api_base, None
+
     def _fallback_resolve(self) -> tuple[str | None, str | None]:
         """Priority-based provider resolution (existing behavior)."""
         p = self.providers
@@ -76,6 +104,10 @@ class ProviderResolver:
             ("gemini", p.gemini),
             ("zhipu", p.zhipu),
             ("groq", p.groq),
+            ("deepseek", p.deepseek),
+            ("dashscope", p.dashscope),
+            ("moonshot", p.moonshot),
+            ("aihubmix", p.aihubmix),
             ("vllm", p.vllm),
         ]
         for name, provider in priority:

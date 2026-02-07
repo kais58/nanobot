@@ -8,13 +8,23 @@ from litellm import acompletion
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
+# Data-driven prefix rules for model routing.
+# Each entry: (model_keywords, litellm_prefix, skip_if_already_prefixed)
+_prefix_rules: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = [
+    (("glm", "zhipu"), "zai", ("zhipu/", "zai/", "openrouter/", "hosted_vllm/")),
+    (("qwen", "dashscope"), "dashscope", ("dashscope/", "openrouter/")),
+    (("moonshot", "kimi"), "moonshot", ("moonshot/", "openrouter/")),
+    (("deepseek",), "deepseek", ("deepseek/", "openrouter/")),
+    (("gemini",), "gemini", ("gemini/", "openrouter/", "openai/", "zai/", "hosted_vllm/")),
+]
+
 
 class LiteLLMProvider(LLMProvider):
     """
     LLM provider using LiteLLM for multi-provider support.
 
-    Supports OpenRouter, Anthropic, OpenAI, Gemini, and many other providers through
-    a unified interface.
+    Supports OpenRouter, Anthropic, OpenAI, Gemini, DeepSeek, DashScope,
+    Moonshot, AiHubMix, and many other providers through a unified interface.
     """
 
     def __init__(
@@ -22,9 +32,11 @@ class LiteLLMProvider(LLMProvider):
         api_key: str | None = None,
         api_base: str | None = None,
         default_model: str = "anthropic/claude-opus-4-5",
+        extra_headers: dict[str, str] | None = None,
     ):
         super().__init__(api_key, api_base)
         self.default_model = default_model
+        self.extra_headers = extra_headers
 
         # Detect known providers by api_key prefix, api_base, or model name
         self.is_openrouter = (api_key and api_key.startswith("sk-or-")) or (
@@ -39,8 +51,12 @@ class LiteLLMProvider(LLMProvider):
             or (bool(api_base) and "z.ai" in (api_base or ""))
         )
 
+        self.is_aihubmix = bool(api_base) and "aihubmix" in (api_base or "")
+
         # Track if using custom endpoint (vLLM, etc.) - exclude known providers
-        self.is_vllm = bool(api_base) and not self.is_openrouter and not self.is_zhipu
+        self.is_vllm = (
+            bool(api_base) and not self.is_openrouter and not self.is_zhipu and not self.is_aihubmix
+        )
 
         # Configure LiteLLM based on provider
         if api_key:
@@ -48,19 +64,62 @@ class LiteLLMProvider(LLMProvider):
                 os.environ["OPENROUTER_API_KEY"] = api_key
             elif self.is_zhipu:
                 os.environ["ZHIPUAI_API_KEY"] = api_key
+            elif self.is_aihubmix:
+                os.environ["OPENAI_API_KEY"] = api_key
             elif self.is_vllm:
                 os.environ["OPENAI_API_KEY"] = api_key
+            elif "deepseek" in model_lower:
+                os.environ.setdefault("DEEPSEEK_API_KEY", api_key)
+            elif "dashscope" in model_lower or "qwen" in model_lower:
+                os.environ.setdefault("DASHSCOPE_API_KEY", api_key)
+            elif "moonshot" in model_lower or "kimi" in model_lower:
+                os.environ.setdefault("MOONSHOT_API_KEY", api_key)
             elif "anthropic" in default_model:
                 os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
             elif "openai" in default_model or "gpt" in default_model:
                 os.environ.setdefault("OPENAI_API_KEY", api_key)
-            elif "gemini" in default_model.lower():
+            elif "gemini" in model_lower:
                 os.environ.setdefault("GEMINI_API_KEY", api_key)
             elif "groq" in default_model:
                 os.environ.setdefault("GROQ_API_KEY", api_key)
 
         # Disable LiteLLM logging noise
         litellm.suppress_debug_info = True
+
+    def _apply_model_prefix(self, model: str) -> str:
+        """Apply the correct LiteLLM prefix to a model name.
+
+        Uses the data-driven ``_prefix_rules`` table. Special cases for
+        OpenRouter, Zhipu with custom api_base, vLLM, and AiHubMix are
+        handled before the table lookup.
+        """
+        # OpenRouter: always prefix
+        if self.is_openrouter and not model.startswith("openrouter/"):
+            return f"openrouter/{model}"
+
+        # Zhipu with custom api_base: use openai/ prefix for direct auth
+        if self.is_zhipu and not model.startswith("openrouter/"):
+            if self.api_base and not model.startswith("openai/"):
+                return f"openai/{model}"
+            if not self.api_base and not model.startswith("zai/"):
+                return f"zai/{model}"
+
+        # AiHubMix: openai-compatible endpoint
+        if self.is_aihubmix and not model.startswith("openai/"):
+            return f"openai/{model}"
+
+        # vLLM: hosted_vllm/ prefix per LiteLLM docs
+        if self.is_vllm:
+            return f"hosted_vllm/{model}"
+
+        # Data-driven prefix rules
+        model_lower = model.lower()
+        for keywords, prefix, skip_prefixes in _prefix_rules:
+            if any(kw in model_lower for kw in keywords):
+                if not model.startswith(skip_prefixes):
+                    return f"{prefix}/{model}"
+
+        return model
 
     async def chat(
         self,
@@ -83,31 +142,7 @@ class LiteLLMProvider(LLMProvider):
         Returns:
             LLMResponse with content and/or tool calls.
         """
-        model = model or self.default_model
-
-        # For OpenRouter, prefix model name if not already prefixed
-        if self.is_openrouter and not model.startswith("openrouter/"):
-            model = f"openrouter/{model}"
-
-        # For Zhipu/Z.ai, route based on whether a custom api_base is set.
-        # With api_base: use openai/ prefix (OpenAI-compatible endpoint, direct auth).
-        # Without api_base: use zai/ prefix (LiteLLM's zhipu SDK auth flow).
-        if self.is_zhipu and not model.startswith("openrouter/"):
-            if self.api_base and not model.startswith("openai/"):
-                model = f"openai/{model}"
-            elif not self.api_base and not model.startswith("zai/"):
-                model = f"zai/{model}"
-
-        # For vLLM, use hosted_vllm/ prefix per LiteLLM docs
-        # Convert openai/ prefix to hosted_vllm/ if user specified it
-        if self.is_vllm:
-            model = f"hosted_vllm/{model}"
-
-        # For Gemini direct (not routed through another provider), ensure gemini/ prefix
-        if "gemini" in model.lower() and not model.startswith(
-            ("gemini/", "openrouter/", "openai/", "zai/", "hosted_vllm/")
-        ):
-            model = f"gemini/{model}"
+        model = self._apply_model_prefix(model or self.default_model)
 
         kwargs: dict[str, Any] = {
             "model": model,
@@ -121,6 +156,8 @@ class LiteLLMProvider(LLMProvider):
             kwargs["api_key"] = self.api_key
         if self.api_base:
             kwargs["api_base"] = self.api_base
+        if self.extra_headers:
+            kwargs["extra_headers"] = self.extra_headers
 
         if tools:
             kwargs["tools"] = tools

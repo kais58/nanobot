@@ -214,6 +214,7 @@ class ProviderConfig(BaseModel):
 
     api_key: str = ""
     api_base: str | None = None
+    extra_headers: dict[str, str] | None = None
 
 
 class ProvidersConfig(BaseModel):
@@ -226,6 +227,10 @@ class ProvidersConfig(BaseModel):
     zhipu: ProviderConfig = Field(default_factory=ProviderConfig)
     vllm: ProviderConfig = Field(default_factory=ProviderConfig)
     gemini: ProviderConfig = Field(default_factory=ProviderConfig)
+    deepseek: ProviderConfig = Field(default_factory=ProviderConfig)
+    dashscope: ProviderConfig = Field(default_factory=ProviderConfig)
+    moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
+    aihubmix: ProviderConfig = Field(default_factory=ProviderConfig)
 
 
 class GatewayConfig(BaseModel):
@@ -282,6 +287,11 @@ class MCPConfig(BaseModel):
 class ToolsConfig(BaseModel):
     """Tools configuration."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
+    restrict_to_workspace: bool = Field(
+        default=False, alias="restrictToWorkspace"
+    )  # Applies to all file tools and exec
     web: WebToolsConfig = Field(default_factory=WebToolsConfig)
     exec: ExecToolConfig = Field(default_factory=ExecToolConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
@@ -302,26 +312,34 @@ class Config(BaseSettings):
         return Path(self.agents.defaults.workspace).expanduser()
 
     def get_api_key(self) -> str | None:
-        """Get API key in priority order: OpenRouter > Anthropic > OpenAI > Gemini > Zhipu > Groq > vLLM."""
+        """Get API key in priority order."""
+        p = self.providers
         return (
-            self.providers.openrouter.api_key
-            or self.providers.anthropic.api_key
-            or self.providers.openai.api_key
-            or self.providers.gemini.api_key
-            or self.providers.zhipu.api_key
-            or self.providers.groq.api_key
-            or self.providers.vllm.api_key
+            p.openrouter.api_key
+            or p.anthropic.api_key
+            or p.openai.api_key
+            or p.gemini.api_key
+            or p.zhipu.api_key
+            or p.groq.api_key
+            or p.deepseek.api_key
+            or p.dashscope.api_key
+            or p.moonshot.api_key
+            or p.aihubmix.api_key
+            or p.vllm.api_key
             or None
         )
 
     def get_api_base(self) -> str | None:
-        """Get API base URL if using OpenRouter, Zhipu or vLLM."""
-        if self.providers.openrouter.api_key:
-            return self.providers.openrouter.api_base or "https://openrouter.ai/api/v1"
-        if self.providers.zhipu.api_key:
-            return self.providers.zhipu.api_base
-        if self.providers.vllm.api_base:
-            return self.providers.vllm.api_base
+        """Get API base URL for the first configured provider that needs one."""
+        p = self.providers
+        if p.openrouter.api_key:
+            return p.openrouter.api_base or "https://openrouter.ai/api/v1"
+        if p.zhipu.api_key:
+            return p.zhipu.api_base
+        if p.aihubmix.api_key:
+            return p.aihubmix.api_base or "https://aihubmix.com/v1"
+        if p.vllm.api_base:
+            return p.vllm.api_base
         return None
 
     def resolve_provider(self, name: str | None = None) -> tuple[str | None, str | None]:
