@@ -35,6 +35,7 @@ def load_config(config_path: Path | None = None) -> Config:
         try:
             with open(path) as f:
                 data = json.load(f)
+            data = _migrate_config(data)
             return Config.model_validate(convert_keys(data))
         except (json.JSONDecodeError, ValueError) as e:
             print(f"Warning: Failed to load config from {path}: {e}")
@@ -60,6 +61,26 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
 
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def _migrate_config(data: dict[str, Any]) -> dict[str, Any]:
+    """Apply forward-compatible config migrations.
+
+    Moves deprecated keys to their new locations so old config files
+    keep working without manual edits.
+    """
+    tools = data.get("tools")
+    if not isinstance(tools, dict):
+        return data
+
+    # Migration: tools.exec.restrictToWorkspace -> tools.restrictToWorkspace
+    exec_cfg = tools.get("exec")
+    if isinstance(exec_cfg, dict):
+        old_key = "restrictToWorkspace"
+        if old_key in exec_cfg and old_key not in tools:
+            tools[old_key] = exec_cfg.pop(old_key)
+
+    return data
 
 
 def convert_keys(data: Any, preserve_key: str | None = None) -> Any:

@@ -91,11 +91,17 @@ class CronTool(Tool):
                 },
                 "deliver": {
                     "type": "boolean",
-                    "description": "Send response to chat channel when job runs",
+                    "description": (
+                        "Whether to send the job's response back to the chat channel. "
+                        "MUST be true for reminders, notifications, and any job where "
+                        "the user expects to see the result."
+                    ),
                 },
                 "channel": {
                     "type": "string",
-                    "description": "Target channel for delivery (telegram/whatsapp/feishu)",
+                    "description": (
+                        "Target channel for delivery (telegram/whatsapp/discord/feishu)"
+                    ),
                 },
                 "to": {
                     "type": "string",
@@ -179,7 +185,7 @@ class CronTool(Tool):
             status = "enabled" if job.enabled else "disabled"
             delivery = ""
             if job.payload.deliver and job.payload.to:
-                delivery = f" -> {job.payload.channel or 'whatsapp'}:{job.payload.to}"
+                delivery = f" -> {job.payload.channel or '?'}:{job.payload.to}"
 
             lines.append(f"- [{job.id}] {job.name} ({status})")
             lines.append(f"  Schedule: {sched}")

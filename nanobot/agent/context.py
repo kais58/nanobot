@@ -2,6 +2,7 @@
 
 import base64
 import mimetypes
+import platform
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,13 @@ Skills with available="false" need dependencies installed first - you can try in
 
         return "\n\n---\n\n".join(parts)
 
+    @staticmethod
+    def _get_runtime_info() -> str:
+        """Get runtime environment info (OS, architecture, Python version)."""
+        system = platform.system()
+        os_name = "macOS" if system == "Darwin" else system
+        return f"{os_name} {platform.machine()}, Python {platform.python_version()}"
+
     def _get_identity(self) -> str:
         """Get the core identity section, loading from IDENTITY.md if available."""
         from datetime import datetime
@@ -204,6 +212,7 @@ Skills with available="false" need dependencies installed first - you can try in
 ## Current Context
 
 **Time**: {now}
+**Runtime**: {self._get_runtime_info()}
 **Workspace**: {workspace_path}
 - Memory files: {workspace_path}/memory/MEMORY.md
 - Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
@@ -228,6 +237,9 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 ## Current Time
 {now}
 
+## Runtime
+{self._get_runtime_info()}
+
 ## Workspace
 Your workspace is at: {workspace_path}
 - Memory files: {workspace_path}/memory/MEMORY.md
@@ -250,6 +262,11 @@ You can schedule tasks using the `cron` tool:
 - **One-time reminders**: `schedule_type="at"` with ISO datetime (e.g., "2025-02-06T09:00:00")
 - **Recurring tasks**: `schedule_type="every"` with seconds (min 60), or `schedule_type="cron"` with expression
 - **Deliver to user**: Set `deliver=true` to message the user when the job runs
+
+**IMPORTANT**: When creating cron jobs for reminders, notifications, or any task where the user
+should see the result, you MUST set `deliver=true` and specify the `channel` and `to` fields.
+Without `deliver=true`, the job runs silently and the user never sees the output.
+The `channel` and `to` fields default to the current conversation if not specified.
 
 Example cron expressions:
 - `0 9 * * *` = 9 AM daily
