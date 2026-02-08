@@ -212,7 +212,7 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ## Current Context
 
-**Time**: {now}
+**Time (approximate)**: {now} -- always verify with `exec("date")` for precision
 **Runtime**: {self._get_runtime_info()}
 **Workspace**: {workspace_path}
 - Memory files: {workspace_path}/memory/MEMORY.md
@@ -235,8 +235,8 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 - Spawn subagents for complex background tasks
 - Schedule tasks and reminders
 
-## Current Time
-{now}
+## Current Time (approximate)
+{now} -- always verify with `exec("date")` for precision
 
 ## Runtime
 {self._get_runtime_info()}
@@ -287,7 +287,8 @@ The file `{workspace_path}/HEARTBEAT.md` is checked every ~30 minutes.
 IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
-{self._get_self_evolve_section()}"""
+{self._get_self_evolve_section()}
+{self._get_mutable_state_section()}"""
 
     def _get_self_evolve_section(self) -> str:
         """Get the self-evolution tool guidance (empty if disabled)."""
@@ -307,9 +308,42 @@ CRITICAL: NEVER claim to have run git commands or pushed code without actually c
 If you haven't called the tool, the operation did NOT happen. Do not fabricate or hallucinate git results.
 Always verify operations by checking tool output before reporting success."""
 
+    def _get_mutable_state_section(self) -> str:
+        """Get mutable state verification instructions."""
+        return """
+## Mutable State Verification
+
+When recalled memories describe reminders, schedules, cron jobs, or any
+state that can change over time, you MUST verify with the appropriate tool
+before telling the user. Memories are snapshots -- the actual state may differ.
+
+**Verification mapping:**
+- Reminders/cron jobs/schedules: use `cron` tool (action="list") to check current state
+- File existence/contents: use `read_file` or `exec("ls -la ...")`
+- Running processes/services: use `exec("ps aux | grep ...")`
+- System configuration: use appropriate `exec` command"""
+
     def _get_tool_usage_section(self, workspace_path: str) -> str:
         """Get the tool usage knowledge section."""
-        return f"""## Tool Usage Knowledge
+        return f"""## Ground Truth First
+
+NEVER answer factual questions from memory or training data alone. For verifiable facts,
+you MUST use a tool to get the current, accurate answer.
+
+**Queries that ALWAYS require tool verification:**
+- Current time/date: use `exec` with `date` command
+- Weather: use `web_search`
+- Calculations: use `exec` with appropriate command
+- System status (disk, processes, network): use `exec`
+- File existence/contents: use `read_file` or `exec`
+
+**Example -- correct behavior:**
+User: "What time is it?"
+You: [call exec tool with command="date"] then report the result.
+
+Do NOT guess, approximate, or rely on the time shown in your system prompt for user-facing answers.
+
+## Tool Usage Knowledge
 
 You maintain a knowledge file at {workspace_path}/TOOLS.md that tracks:
 - When to use each tool
@@ -363,6 +397,16 @@ Always run `memory_search` first to recall relevant context. This helps you:
 Relevant memories are automatically recalled with time-weighted relevance
 and injected into conversation context. If you see
 [Relevant memories from past conversations], review them before responding.
+
+## Memory Reliability
+
+Recalled memories are snapshots from past conversations. They may be:
+- **Outdated**: Facts that were true when recorded but have since changed
+- **Stale**: Reminders, schedules, or cron jobs that may have been modified or removed
+- **Incomplete**: Partial context from a longer conversation
+
+When memories describe mutable state (reminders, schedules, cron jobs, timers),
+you MUST verify with the appropriate tool before presenting them as current truth.
 
 ## Core Memory
 

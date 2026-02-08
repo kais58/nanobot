@@ -145,6 +145,17 @@ class MemoryExtractionConfig(BaseModel):
     candidate_threshold: float = Field(default=0.7, alias="candidateThreshold")
 
 
+class IntentConfig(BaseModel):
+    """Query intent classification configuration."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = True
+    llm_fallback: bool = Field(default=True, alias="llmFallback")
+    classifier_model: str | None = Field(default=None, alias="classifierModel")
+    classifier_provider: str | None = Field(default=None, alias="classifierProvider")
+
+
 class RegistryConfig(BaseModel):
     """Agent registry configuration for ACP."""
 
@@ -221,6 +232,7 @@ class AgentDefaults(BaseModel):
         default_factory=MemoryExtractionConfig, alias="memoryExtraction"
     )
     daemon: DaemonConfig = Field(default_factory=DaemonConfig, alias="daemon")
+    intent: IntentConfig = Field(default_factory=IntentConfig)
 
 
 class AgentsConfig(BaseModel):
