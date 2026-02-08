@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.intent import IntentClassifier, QueryIntent
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from nanobot.agent.tools.message import MessageTool
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
         ContextConfig,
         DaemonConfig,
         ExecToolConfig,
+        IntentConfig,
         MCPConfig,
         MemoryConfig,
         MemoryExtractionConfig,
@@ -58,6 +60,47 @@ def _truncate_at_sentence(text: str, max_chars: int = 300) -> str:
 
     # No sentence boundary found, hard truncate with ellipsis
     return truncated[:max_chars] + "..."
+
+
+def _format_memory_age(created_at: str) -> str:
+    """Format a memory's created_at timestamp as a human-readable age.
+
+    Args:
+        created_at: ISO format timestamp string.
+
+    Returns:
+        Human-readable age like "2 hours ago", "3 days ago", or "unknown age".
+    """
+    if not created_at:
+        return "unknown age"
+    try:
+        from datetime import datetime, timezone
+
+        ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        # Ensure both are offset-aware or both naive
+        now = datetime.now(timezone.utc)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = now - ts
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes} min ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours} hour{'s' if hours != 1 else ''} ago"
+        days = hours // 24
+        if days < 14:
+            return f"{days} day{'s' if days != 1 else ''} ago"
+        weeks = days // 7
+        if weeks < 8:
+            return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+        months = days // 30
+        return f"{months} month{'s' if months != 1 else ''} ago"
+    except Exception:
+        return "unknown age"
 
 
 class AgentLoop:
@@ -92,6 +135,7 @@ class AgentLoop:
         restrict_to_workspace: bool = False,
         registry: "AgentRegistry | None" = None,
         daemon_config: "DaemonConfig | None" = None,
+        intent_config: "IntentConfig | None" = None,
         temperature: float = 0.7,
         tool_temperature: float = 0.0,
     ):
@@ -99,6 +143,7 @@ class AgentLoop:
             CompactionConfig,
             ContextConfig,
             ExecToolConfig,
+            IntentConfig,
             MCPConfig,
             MemoryConfig,
         )
@@ -127,6 +172,13 @@ class AgentLoop:
         from nanobot.config.schema import MemoryExtractionConfig
 
         self._extraction_config = memory_extraction or MemoryExtractionConfig()
+
+        # Intent classification config
+        self._intent_config = intent_config or IntentConfig()
+        self._intent_classifier = IntentClassifier(
+            enabled=self._intent_config.enabled,
+            llm_fallback=self._intent_config.llm_fallback,
+        )
 
         # Vector store for semantic memory (initialized in run())
         self.vector_store: "VectorStore | None" = None
@@ -452,6 +504,14 @@ class AgentLoop:
         # Initialize memory extraction pipeline
         self._init_extraction()
 
+        # Wire intent classifier LLM provider if configured
+        if self._intent_config.enabled and self._intent_config.llm_fallback:
+            classifier_provider = self._resolve_subsystem_provider(
+                self._intent_config.classifier_provider
+            )
+            self._intent_classifier.provider = classifier_provider
+            self._intent_classifier.model = self._intent_config.classifier_model or self.model
+
         # Check for restart signal (e.g., after MCP server installation)
         await self._check_restart_signal()
 
@@ -562,25 +622,41 @@ class AgentLoop:
         # Extract channel context from metadata (e.g., Discord channel history)
         channel_context = msg.metadata.get("channel_context", "") if msg.metadata else ""
 
-        # Auto-recall relevant memories
-        memory_context = await self._auto_recall(msg.content)
+        # Classify intent to decide memory injection and tool_choice
+        intent = await self._intent_classifier.classify(msg.content)
+        logger.debug(f"Query intent: {intent.value}")
+
+        # Auto-recall relevant memories (intent-aware)
+        memory_context = await self._auto_recall(msg.content, intent)
         if memory_context:
-            # Prepend memory context to channel context
             if channel_context:
                 channel_context = f"{memory_context}\n\n{channel_context}"
             else:
                 channel_context = memory_context
 
+        # For FACTUAL queries, inject a tool-use directive into the message
+        user_content = msg.content
+        if intent == QueryIntent.FACTUAL:
+            user_content = (
+                "[SYSTEM: This query requires verifiable facts. "
+                "You MUST use a tool to verify your answer.]\n\n" + user_content
+            )
+
         # Build initial messages (use token-aware history)
         messages = self.context.build_messages(
             history=session.get_history(max_tokens=self.context_config.history_budget),
-            current_message=msg.content,
+            current_message=user_content,
             media=msg.media if msg.media else None,
             channel_context=channel_context,
         )
 
         # Run compaction if needed
         messages = await self._maybe_compact(messages, session)
+
+        # Determine tool_choice based on intent
+        forced_tool_choice: str | None = None
+        if intent == QueryIntent.FACTUAL:
+            forced_tool_choice = "required"
 
         # Agent loop
         iteration = 0
@@ -592,14 +668,17 @@ class AgentLoop:
             # Check context budget before LLM call
             self._check_context_budget(messages)
 
-            # Call LLM — use low temperature for tool-calling determinism
+            # Call LLM -- use low temperature for tool-calling determinism
             tool_defs = self.tools.get_definitions()
             current_temp = self.tool_temperature if tool_defs else self.temperature
+            # Force tool use on first iteration for FACTUAL queries
+            tc = forced_tool_choice if iteration == 1 else None
             response = await self.provider.chat(
                 messages=messages,
                 tools=tool_defs,
                 model=self.model,
                 temperature=current_temp,
+                tool_choice=tc,
             )
 
             # Handle tool calls
@@ -830,12 +909,22 @@ class AgentLoop:
         response = await self._process_message(msg)
         return response.content if response else ""
 
-    async def _auto_recall(self, user_message: str) -> str | None:
+    async def _auto_recall(
+        self,
+        user_message: str,
+        intent: QueryIntent = QueryIntent.CONVERSATIONAL,
+    ) -> str | None:
         """
         Automatically search memory for context relevant to the user's message.
 
+        Memory injection is conditional on query intent:
+        - FACTUAL: skip memory entirely (force tool use instead)
+        - VERIFY_STATE: inject memory with [UNVERIFIED] annotations
+        - MEMORY/ACTION/CONVERSATIONAL: inject memory normally with timestamps
+
         Args:
             user_message: The user's incoming message.
+            intent: Classified query intent.
 
         Returns:
             Relevant memory context, or None if disabled or no results.
@@ -844,6 +933,11 @@ class AgentLoop:
             return None
 
         if not self.vector_store:
+            return None
+
+        # Skip memory for factual queries -- tools should provide the answer
+        if intent == QueryIntent.FACTUAL:
+            logger.debug("Skipping memory injection for FACTUAL query")
             return None
 
         try:
@@ -868,11 +962,31 @@ class AgentLoop:
                 )
 
             if results:
-                memory_context.append("[Relevant memories from past conversations]")
+                if intent == QueryIntent.VERIFY_STATE:
+                    memory_context.append(
+                        "[Recalled memories -- these describe MUTABLE STATE "
+                        "that may have changed.\n"
+                        "You MUST verify each claim with tools before "
+                        "presenting it as current.]"
+                    )
+                else:
+                    memory_context.append(
+                        "[Relevant memories from past conversations "
+                        "-- may be outdated. Verify factual claims "
+                        "with tools.]"
+                    )
+
                 for r in results:
                     text = r.get("text", "")
                     text = _truncate_at_sentence(text, 300)
-                    memory_context.append(f"- {text}")
+                    age = _format_memory_age(r.get("created_at", ""))
+                    entry = f"- [{age}] {text}"
+
+                    # Annotate mutable state entries
+                    if intent == QueryIntent.VERIFY_STATE:
+                        entry = self._annotate_mutable_state(entry)
+
+                    memory_context.append(entry)
 
             # Proactive reminders
             if self.proactive_memory:
@@ -890,6 +1004,19 @@ class AgentLoop:
         except Exception as e:
             logger.warning(f"Auto-recall failed: {e}")
             return None
+
+    def _annotate_mutable_state(self, entry: str) -> str:
+        """Add verification hints to memory entries about mutable state."""
+        import re as _re
+
+        text_lower = entry.lower()
+        if _re.search(r"\b(reminder|cron|schedule|job|recurring)\b", text_lower):
+            return entry + "\n    -> VERIFY: use `cron` tool to check"
+        if _re.search(r"\b(file|exists|created)\b", text_lower):
+            return entry + "\n    -> VERIFY: use `read_file` or `exec`"
+        if _re.search(r"\b(running|process|service|active)\b", text_lower):
+            return entry + "\n    -> VERIFY: use `exec` to check"
+        return entry
 
     async def _index_conversation(
         self,

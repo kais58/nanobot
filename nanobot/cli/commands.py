@@ -235,6 +235,7 @@ def gateway(
         restrict_to_workspace=config.tools.restrict_to_workspace,
         registry=registry,
         daemon_config=daemon_cfg,
+        intent_config=config.agents.defaults.intent,
         temperature=config.agents.defaults.temperature,
         tool_temperature=config.agents.defaults.tool_temperature,
     )
@@ -432,6 +433,7 @@ def agent(
         provider_resolver=resolver,
         memory_extraction=config.agents.defaults.memory_extraction,
         restrict_to_workspace=config.tools.restrict_to_workspace,
+        intent_config=config.agents.defaults.intent,
     )
 
     if message:
