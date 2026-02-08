@@ -13,6 +13,7 @@ from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
+from nanobot.bus.progress import ProgressCallback, ProgressEvent, ProgressKind
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider
 
@@ -41,6 +42,7 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         registry: "AgentRegistry | None" = None,
         evolve_manager: "SelfEvolveManager | None" = None,
+        progress_callback: ProgressCallback | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig
 
@@ -52,6 +54,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self._registry = registry
         self._evolve_manager = evolve_manager
+        self._progress_callback = progress_callback
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def spawn(
@@ -61,6 +64,7 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         registry_task_id: str | None = None,
+        silent: bool = False,
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
@@ -71,6 +75,7 @@ class SubagentManager:
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
             registry_task_id: Optional task ID from the agent registry.
+            silent: If True, suppress result announcements to the message bus.
 
         Returns:
             Status message indicating the subagent was started.
@@ -85,7 +90,7 @@ class SubagentManager:
 
         # Create background task
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, registry_task_id)
+            self._run_subagent(task_id, task, display_label, origin, registry_task_id, silent)
         )
         self._running_tasks[task_id] = bg_task
 
@@ -102,6 +107,7 @@ class SubagentManager:
         label: str,
         origin: dict[str, str],
         registry_task_id: str | None = None,
+        silent: bool = False,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info(f"Subagent [{task_id}] starting task: {label}")
@@ -141,9 +147,10 @@ class SubagentManager:
                     )
                 except HandshakeError as e:
                     logger.error(f"Subagent [{task_id}] handshake failed: {e}")
-                    await self._announce_result(
-                        task_id, label, task, f"Handshake failed: {e}", origin, "error"
-                    )
+                    if not silent:
+                        await self._announce_result(
+                            task_id, label, task, f"Handshake failed: {e}", origin, "error"
+                        )
                     return
 
                 # Transition task to IN_PROGRESS
@@ -212,7 +219,34 @@ class SubagentManager:
                     # Execute tools
                     for tool_call in response.tool_calls:
                         logger.debug(f"Subagent [{task_id}] executing: {tool_call.name}")
+                        if self._progress_callback and not silent:
+                            await self._progress_callback(
+                                ProgressEvent(
+                                    channel=origin["channel"],
+                                    chat_id=origin["chat_id"],
+                                    kind=ProgressKind.TOOL_START,
+                                    tool_name=tool_call.name,
+                                    detail=f"[subagent] Executing {tool_call.name}",
+                                    iteration=iteration,
+                                )
+                            )
                         result = await tools.execute(tool_call.name, tool_call.arguments)
+                        if self._progress_callback and not silent:
+                            status = (
+                                "error"
+                                if isinstance(result, str) and result.startswith("Error")
+                                else "ok"
+                            )
+                            await self._progress_callback(
+                                ProgressEvent(
+                                    channel=origin["channel"],
+                                    chat_id=origin["chat_id"],
+                                    kind=ProgressKind.TOOL_COMPLETE,
+                                    tool_name=tool_call.name,
+                                    detail=f"[subagent] {tool_call.name}: {status}",
+                                    iteration=iteration,
+                                )
+                            )
                         messages.append(
                             {
                                 "role": "tool",
@@ -236,11 +270,12 @@ class SubagentManager:
                     await self._registry.update_agent_state(
                         agent_id, AgentState.COMPLETED, reason="task finished"
                     )
-                except ValueError:
-                    pass  # May already be in a terminal state
+                except Exception:
+                    pass  # May already be in a terminal state or DB error
 
             logger.info(f"Subagent [{task_id}] completed successfully")
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
+            if not silent:
+                await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
@@ -254,16 +289,17 @@ class SubagentManager:
                     await self._registry.update_agent_state(
                         agent_id, AgentState.FAILED, reason=str(e)
                     )
-                except ValueError:
+                except Exception:
                     pass
                 try:
                     await self._registry.update_task_state(
                         registry_task_id, TaskState.FAILED, reason=str(e)
                     )
-                except ValueError:
+                except Exception:
                     pass
 
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            if not silent:
+                await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
         finally:
             if pulse_task:
@@ -283,7 +319,7 @@ class SubagentManager:
                         await self._registry.update_agent_state(
                             agent_id, AgentState.IDLE, reason="cleanup"
                         )
-                except (ValueError, Exception):
+                except Exception:
                     pass
 
     async def _pulse_loop(self, agent_id: str, interval: int = 60) -> None:

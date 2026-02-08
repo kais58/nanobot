@@ -1,6 +1,7 @@
 """Heartbeat service - periodic agent wake-up to check for tasks."""
 
 import asyncio
+import hashlib
 import json
 import tempfile
 import time
@@ -17,6 +18,26 @@ if TYPE_CHECKING:
 
 # Default interval: 30 minutes
 DEFAULT_HEARTBEAT_INTERVAL_S = 30 * 60
+
+# Default HEARTBEAT.md content — headers + HTML comments only so
+# _is_heartbeat_empty() treats it as "no actionable tasks".
+DEFAULT_STRATEGY_CONTENT = """\
+# Heartbeat Strategy
+
+<!-- This file is checked by the daemon every ~30 minutes (or ~5 min during active chat).
+     Add tasks below as markdown checkboxes. The daemon will read and execute them.
+     Mark completed tasks with [x] — they will be skipped on future ticks.
+
+     When to add tasks here:
+     - Background monitoring and maintenance YOU identify
+     - Self-improvement goals based on TOOLS.md lessons
+     - Internal housekeeping (never user-requested recurring tasks -- those go to cron)
+
+     Example:
+     - [ ] Review TOOLS.md for recurring failures and create fix PRs
+     - [ ] Check workspace for stale temp files
+-->
+"""
 
 # The prompt sent to agent during heartbeat
 HEARTBEAT_PROMPT = """Read HEARTBEAT.md in your workspace (if it exists).
@@ -74,16 +95,32 @@ Mark completed tasks with [x] in the strategy file."""
 
 
 def _is_heartbeat_empty(content: str | None) -> bool:
-    """Check if HEARTBEAT.md has no actionable content."""
+    """Check if HEARTBEAT.md has no actionable content.
+
+    Skips blank lines, markdown headers, HTML comments (including multi-line),
+    and checked/unchecked checkboxes without text beyond the marker.
+    """
     if not content:
         return True
 
-    # Lines to skip: empty, headers, HTML comments, empty checkboxes
     skip_patterns = {"- [ ]", "* [ ]", "- [x]", "* [x]"}
+    in_comment = False
 
     for line in content.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#") or line.startswith("<!--") or line in skip_patterns:
+        stripped = line.strip()
+
+        # Track multi-line HTML comments
+        if in_comment:
+            if "-->" in stripped:
+                in_comment = False
+            continue
+
+        if stripped.startswith("<!--"):
+            if "-->" not in stripped:
+                in_comment = True
+            continue
+
+        if not stripped or stripped.startswith("#") or stripped in skip_patterns:
             continue
         return False  # Found actionable content
 
@@ -162,6 +199,12 @@ class HeartbeatService:
         self._on_spawn = on_spawn
         self._monitor_task: asyncio.Task | None = None
 
+        # Content-hash tracking: skip triage when nothing changed since last no-action
+        self._last_noaction_hash: str | None = None
+
+        # Ensure strategy file exists for new/existing deployments
+        self._ensure_strategy_file()
+
     @property
     def heartbeat_file(self) -> Path:
         return self.workspace / self._strategy_file
@@ -174,6 +217,17 @@ class HeartbeatService:
             except Exception:
                 return None
         return None
+
+    def _ensure_strategy_file(self) -> None:
+        """Create the default strategy file if it doesn't exist."""
+        if self.heartbeat_file.exists():
+            return
+        try:
+            self.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+            self.heartbeat_file.write_text(DEFAULT_STRATEGY_CONTENT, encoding="utf-8")
+            logger.info(f"Created default strategy file: {self.heartbeat_file}")
+        except Exception as e:
+            logger.warning(f"Failed to create strategy file: {e}")
 
     async def start(self) -> None:
         """Start the heartbeat service."""
@@ -262,11 +316,12 @@ class HeartbeatService:
         git_status: str | None = None
         tmux_sessions: str | None = None
 
-        # Read strategy file
+        # Read strategy file (treat template-only content as empty)
         try:
             sf = self.workspace / self._strategy_file
             if sf.exists():
-                strategy_content = sf.read_text(encoding="utf-8")
+                raw = sf.read_text(encoding="utf-8")
+                strategy_content = None if _is_heartbeat_empty(raw) else raw
         except Exception as e:
             logger.warning(f"Tier 0: failed to read strategy file: {e}")
 
@@ -345,12 +400,7 @@ class HeartbeatService:
         except Exception as e:
             logger.warning(f"Tier 0: TOOLS.md check failed: {e}")
 
-        has_signals = (
-            bool(strategy_content)
-            or bool(tmux_sessions)
-            or bool(overdue_followups)
-            or bool(tools_lessons)
-        )
+        has_signals = bool(strategy_content) or bool(overdue_followups) or bool(tools_lessons)
 
         return {
             "strategy_content": strategy_content,
@@ -379,7 +429,7 @@ class HeartbeatService:
             response = await self._triage_provider.chat(
                 messages=[{"role": "user", "content": prompt}],
                 model=self._triage_model,
-                temperature=0.2,
+                temperature=0.0,
                 max_tokens=256,
             )
 
@@ -432,6 +482,19 @@ class HeartbeatService:
         # Hybrid dispatch: complex tasks go to subagent via registry
         if complexity == "complex" and self._registry and self._on_spawn:
             try:
+                # Dedup: skip if a task with similar description is pending or active
+                from nanobot.registry.store import TaskState
+
+                for state in (TaskState.PENDING, TaskState.ASSIGNED, TaskState.IN_PROGRESS):
+                    existing = await self._registry.list_tasks(state=state)
+                    for t in existing:
+                        if reason and reason[:40] in t.get("description", ""):
+                            logger.info(
+                                f"Tier 2: skipping duplicate task ({state.value}), "
+                                f"existing={t.get('task_id')}"
+                            )
+                            return
+
                 task_id = str(uuid.uuid4())[:8]
                 await self._registry.create_task(
                     task_id=task_id,
@@ -476,6 +539,14 @@ class HeartbeatService:
             logger.debug("Daemon tick: no signals detected")
             return
 
+        # Content-hash check: skip triage if nothing changed since last no-action
+        ctx_hash = hashlib.md5(
+            json.dumps(context, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if ctx_hash == self._last_noaction_hash:
+            logger.debug("Daemon tick: context unchanged since last no-action, skipping triage")
+            return
+
         # Tier 1: triage
         try:
             triage = await self._triage(context)
@@ -484,13 +555,18 @@ class HeartbeatService:
             return
 
         if not triage.get("act"):
+            self._last_noaction_hash = ctx_hash
             logger.info(f"Daemon tick: no action needed - {triage.get('reason')}")
             return
 
         # Tier 2: execute
         try:
             await self._execute_daemon_action(context, triage)
+            # Cache hash after action so identical context won't re-trigger
+            self._last_noaction_hash = ctx_hash
         except Exception as e:
+            # Clear hash on failure so next tick retries
+            self._last_noaction_hash = None
             logger.warning(f"Daemon tick: execution failed: {e}")
 
     async def trigger_now(self) -> str | None:

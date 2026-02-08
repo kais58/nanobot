@@ -70,8 +70,9 @@ document the tools here with usage patterns.
 - Best practices: Use for tasks that don't need immediate response
 
 ### cron
-- Use when: Need to schedule tasks for specific times or intervals
-- Best practices: Use 'at' for one-time, 'cron' for recurring
+- Use when: User requests scheduled/recurring tasks, reminders, or time-based notifications
+- Best practices: Use 'at' for one-time, 'cron' for recurring. Always set deliver=true for user-facing jobs.
+- NOTE: Never use HEARTBEAT.md for user-requested tasks -- always use this cron tool
 
 ### install_mcp_server
 - Use when: User wants to add new MCP server capabilities
@@ -123,19 +124,25 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning(f"Failed to create TOOLS.md: {e}")
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        budget: int | None = None,
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
 
         Args:
             skill_names: Optional list of skills to include.
+            budget: Max estimated token count (chars // 4). Truncates low-priority
+                sections (skills summary, then bootstrap extras) when exceeded.
 
         Returns:
             Complete system prompt.
         """
         parts = []
 
-        # Core identity
+        # Core identity (never truncated)
         parts.append(self._get_identity())
 
         # Bootstrap files
@@ -158,6 +165,9 @@ class ContextBuilder:
         if self.memory_enabled:
             parts.append(self._get_memory_instructions())
 
+        # Clarification guidance
+        parts.append(self._get_clarification_instructions())
+
         # Skills - progressive loading
         # 1. Always-loaded skills: include full content
         always_skills = self.skills.get_always_skills()
@@ -176,7 +186,19 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
 
-        return "\n\n---\n\n".join(parts)
+        result = "\n\n---\n\n".join(parts)
+
+        # Enforce budget by dropping lowest-priority sections from the end
+        if budget and len(result) // 4 > budget:
+            est = len(result) // 4
+            logger.warning(f"System prompt ~{est} tokens exceeds budget {budget}, truncating")
+            # Drop skills summary first, then bootstrap extras
+            while len(parts) > 1 and len("\n\n---\n\n".join(parts)) // 4 > budget:
+                removed = parts.pop()
+                logger.debug(f"Dropped section ({len(removed)} chars) to meet budget")
+            result = "\n\n---\n\n".join(parts)
+
+        return result
 
     @staticmethod
     def _get_runtime_info() -> str:
@@ -212,12 +234,15 @@ Skills with available="false" need dependencies installed first - you can try in
 
 ## Current Context
 
-**Time**: {now}
+**Time (approximate)**: {now} -- always verify with `exec("date")` for precision
 **Runtime**: {self._get_runtime_info()}
 **Workspace**: {workspace_path}
-- Memory files: {workspace_path}/memory/MEMORY.md
 - Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+
+**IMPORTANT**: Only create files inside your workspace. Never create nested workspace
+directories (e.g. `workspace/temp/workspace/`). For code modifications, use the
+`self_evolve` tool which manages its own repo clone.
 
 {self._get_capabilities_section(workspace_path)}
 
@@ -235,24 +260,27 @@ You are nanobot, a helpful AI assistant. You have access to tools that allow you
 - Spawn subagents for complex background tasks
 - Schedule tasks and reminders
 
-## Current Time
-{now}
+## Current Time (approximate)
+{now} -- always verify with `exec("date")` for precision
 
 ## Runtime
 {self._get_runtime_info()}
 
 ## Workspace
 Your workspace is at: {workspace_path}
-- Memory files: {workspace_path}/memory/MEMORY.md
 - Daily notes: {workspace_path}/memory/YYYY-MM-DD.md
 - Custom skills: {workspace_path}/skills/{{skill-name}}/SKILL.md
+
+**IMPORTANT**: Only create files inside your workspace. Never create nested workspace
+directories (e.g. `workspace/temp/workspace/`). For code modifications, use the
+`self_evolve` tool which manages its own repo clone.
 
 {self._get_capabilities_section(workspace_path)}
 
 {self._get_tool_usage_section(workspace_path)}
 
 Always be helpful, accurate, and concise. When using tools, explain what you're doing.
-When remembering something, write to {workspace_path}/memory/MEMORY.md"""
+When remembering something, use the memory tools (memory_search, write_file to daily notes)."""
 
     def _get_capabilities_section(self, workspace_path: str) -> str:
         """Get the proactive capabilities section."""
@@ -275,19 +303,23 @@ Example cron expressions:
 - `*/30 * * * *` = every 30 minutes
 - `0 */2 * * *` = every 2 hours
 
-### Heartbeat Tasks (HEARTBEAT.md)
-The file `{workspace_path}/HEARTBEAT.md` is checked every ~30 minutes.
+### Heartbeat Tasks (HEARTBEAT.md) -- AGENT-ONLY
+The file `{workspace_path}/HEARTBEAT.md` is your private task list, checked every ~30 minutes.
+- ONLY for self-directed background work: self-improvement, monitoring, maintenance
+- NEVER put user-requested tasks here -- use the cron tool instead
 - Add tasks as markdown checkboxes: `- [ ] Task description`
-- You'll be asked to read and act on any tasks listed
 
-**When to use cron vs heartbeat:**
-- Use **cron** for precise timing (9 AM daily, every 2 hours)
-- Use **HEARTBEAT.md** for approximate periodic checks (~30 min)
+### When to use cron vs heartbeat:
+- **User says "remind me", "every day at 9 AM", "check X daily"** -> cron tool (always)
+- **User asks to schedule anything** -> cron tool (always)
+- **Agent identifies own maintenance/improvement task** -> HEARTBEAT.md
+- When in doubt, use cron -- it's more precise and user-visible
 
 IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
-{self._get_self_evolve_section()}"""
+{self._get_self_evolve_section()}
+{self._get_mutable_state_section()}"""
 
     def _get_self_evolve_section(self) -> str:
         """Get the self-evolution tool guidance (empty if disabled)."""
@@ -307,9 +339,65 @@ CRITICAL: NEVER claim to have run git commands or pushed code without actually c
 If you haven't called the tool, the operation did NOT happen. Do not fabricate or hallucinate git results.
 Always verify operations by checking tool output before reporting success."""
 
+    def _get_mutable_state_section(self) -> str:
+        """Get mutable state verification instructions."""
+        return """
+## Mutable State Verification
+
+When recalled memories describe reminders, schedules, cron jobs, or any
+state that can change over time, you MUST verify with the appropriate tool
+before telling the user. Memories are snapshots -- the actual state may differ.
+
+**Verification mapping:**
+- Reminders/cron jobs/schedules: use `cron` tool (action="list") to check current state
+- File existence/contents: use `read_file` or `exec("ls -la ...")`
+- Running processes/services: use `exec("ps aux | grep ...")`
+- System configuration: use appropriate `exec` command"""
+
     def _get_tool_usage_section(self, workspace_path: str) -> str:
         """Get the tool usage knowledge section."""
-        return f"""## Tool Usage Knowledge
+        return f"""## Action Integrity
+
+CRITICAL: When asked to perform an action (write a file, set up a cron job, update config,
+install something, etc.), you MUST call the appropriate tool. NEVER claim to have performed
+an action unless you actually called a tool and received a successful result.
+
+**Rules:**
+1. To write/update a file -> call `write_file` or `edit_file`. Saying "I updated X" without
+   calling a tool means the file was NOT changed.
+2. To create a cron job -> call `cron` tool. Describing the schedule is not the same as creating it.
+3. After calling a tool, CHECK THE RESULT before reporting success. If the tool returned an error,
+   report the error -- do not claim success.
+4. NEVER use phrases like "I have updated", "I've written", "I've configured" in your response
+   unless the corresponding tool call succeeded in this conversation turn.
+
+**Example -- WRONG behavior:**
+User: "Write my preferences to USER.md"
+You: "I have updated USER.md with your preferences." (NO tool was called -- file unchanged!)
+
+**Example -- CORRECT behavior:**
+User: "Write my preferences to USER.md"
+You: [call write_file tool] -> verify result -> "Done, I've written your preferences to USER.md."
+
+## Ground Truth First
+
+NEVER answer factual questions from memory or training data alone. For verifiable facts,
+you MUST use a tool to get the current, accurate answer.
+
+**Queries that ALWAYS require tool verification:**
+- Current time/date: use `exec` with `date` command
+- Weather: use `web_search`
+- Calculations: use `exec` with appropriate command
+- System status (disk, processes, network): use `exec`
+- File existence/contents: use `read_file` or `exec`
+
+**Example -- correct behavior:**
+User: "What time is it?"
+You: [call exec tool with command="date"] then report the result.
+
+Do NOT guess, approximate, or rely on the time shown in your system prompt for user-facing answers.
+
+## Tool Usage Knowledge
 
 You maintain a knowledge file at {workspace_path}/TOOLS.md that tracks:
 - When to use each tool
@@ -364,11 +452,44 @@ Relevant memories are automatically recalled with time-weighted relevance
 and injected into conversation context. If you see
 [Relevant memories from past conversations], review them before responding.
 
+## Memory Reliability
+
+Recalled memories are snapshots from past conversations. They may be:
+- **Outdated**: Facts that were true when recorded but have since changed
+- **Stale**: Reminders, schedules, or cron jobs that may have been modified or removed
+- **Incomplete**: Partial context from a longer conversation
+
+When memories describe mutable state (reminders, schedules, cron jobs, timers),
+you MUST verify with the appropriate tool before presenting them as current truth.
+
 ## Core Memory
 
 Core memory is a small persistent scratchpad always visible in your
 context. Use `core_memory_update` to store important user info,
 preferences, and active project context. This avoids repeated lookups."""
+
+    def _get_clarification_instructions(self) -> str:
+        """Get instructions for when the agent should ask clarifying questions."""
+        return """# Clarification Protocol
+
+When to ask for clarification:
+- The request is ambiguous with multiple valid interpretations
+- A destructive or irreversible action is requested (deleting files, modifying configs)
+- Required parameters are missing and cannot be reasonably inferred
+- The task scope is unclear (could be simple fix or major refactor)
+
+How to clarify:
+- Ask ONE focused question at a time
+- Offer 2-3 concrete options when possible
+- Include your best guess: "I'll assume X unless you say otherwise"
+- Format options as a numbered list for easy selection
+
+When NOT to clarify:
+- Simple greetings or casual conversation
+- Clear, direct requests with obvious intent
+- Follow-up messages in an ongoing task
+- When context from conversation history makes intent obvious
+- When a reasonable default exists and the action is reversible"""
 
     def _is_bootstrap_stale(self) -> bool:
         """Check if any bootstrap files have been modified since last cache."""
@@ -413,6 +534,7 @@ preferences, and active project context. This avoids repeated lookups."""
         skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel_context: str = "",
+        system_prompt_budget: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -423,6 +545,7 @@ preferences, and active project context. This avoids repeated lookups."""
             skill_names: Optional skills to include.
             media: Optional list of local file paths for images/media.
             channel_context: Optional recent channel messages for context.
+            system_prompt_budget: Max estimated token count for system prompt.
 
         Returns:
             List of messages including system prompt.
@@ -430,7 +553,7 @@ preferences, and active project context. This avoids repeated lookups."""
         messages = []
 
         # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        system_prompt = self.build_system_prompt(skill_names, budget=system_prompt_budget)
         messages.append({"role": "system", "content": system_prompt})
 
         # History
