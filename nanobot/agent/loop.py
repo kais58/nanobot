@@ -926,6 +926,7 @@ class AgentLoop:
             current_message=user_content,
             media=msg.media if msg.media else None,
             channel_context=channel_context,
+            system_prompt_budget=self.context_config.system_prompt_budget,
         )
 
         # Run compaction if needed
@@ -1277,6 +1278,7 @@ class AgentLoop:
         messages = self.context.build_messages(
             history=session.get_history(max_tokens=self.context_config.history_budget),
             current_message=msg.content,
+            system_prompt_budget=self.context_config.system_prompt_budget,
         )
 
         # Run compaction if needed
@@ -1793,7 +1795,19 @@ class AgentLoop:
             from pathlib import Path
 
             vector_db_path = Path("memory") / "extraction_vectors.db"
-            embedding_service = EmbeddingService(model=cfg.embedding_model)
+
+            # Resolve embedding credentials (mirrors _init_memory pattern)
+            embed_key, embed_base = None, None
+            if self.provider_resolver:
+                embed_key, embed_base = self.provider_resolver.resolve(cfg.embedding_provider)
+            else:
+                embed_key = self.provider.api_key
+
+            embedding_service = EmbeddingService(
+                model=cfg.embedding_model,
+                api_key=embed_key,
+                api_base=embed_base,
+            )
             extraction_store = VectorMemoryStore(
                 db_path=vector_db_path,
                 base_dir=self.workspace,

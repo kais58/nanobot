@@ -123,19 +123,25 @@ class ContextBuilder:
             except Exception as e:
                 logger.warning(f"Failed to create TOOLS.md: {e}")
 
-    def build_system_prompt(self, skill_names: list[str] | None = None) -> str:
+    def build_system_prompt(
+        self,
+        skill_names: list[str] | None = None,
+        budget: int | None = None,
+    ) -> str:
         """
         Build the system prompt from bootstrap files, memory, and skills.
 
         Args:
             skill_names: Optional list of skills to include.
+            budget: Max estimated token count (chars // 4). Truncates low-priority
+                sections (skills summary, then bootstrap extras) when exceeded.
 
         Returns:
             Complete system prompt.
         """
         parts = []
 
-        # Core identity
+        # Core identity (never truncated)
         parts.append(self._get_identity())
 
         # Bootstrap files
@@ -179,7 +185,19 @@ Skills with available="false" need dependencies installed first - you can try in
 
 {skills_summary}""")
 
-        return "\n\n---\n\n".join(parts)
+        result = "\n\n---\n\n".join(parts)
+
+        # Enforce budget by dropping lowest-priority sections from the end
+        if budget and len(result) // 4 > budget:
+            est = len(result) // 4
+            logger.warning(f"System prompt ~{est} tokens exceeds budget {budget}, truncating")
+            # Drop skills summary first, then bootstrap extras
+            while len(parts) > 1 and len("\n\n---\n\n".join(parts)) // 4 > budget:
+                removed = parts.pop()
+                logger.debug(f"Dropped section ({len(removed)} chars) to meet budget")
+            result = "\n\n---\n\n".join(parts)
+
+        return result
 
     @staticmethod
     def _get_runtime_info() -> str:
@@ -514,6 +532,7 @@ When NOT to clarify:
         skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel_context: str = "",
+        system_prompt_budget: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Build the complete message list for an LLM call.
@@ -524,6 +543,7 @@ When NOT to clarify:
             skill_names: Optional skills to include.
             media: Optional list of local file paths for images/media.
             channel_context: Optional recent channel messages for context.
+            system_prompt_budget: Max estimated token count for system prompt.
 
         Returns:
             List of messages including system prompt.
@@ -531,7 +551,7 @@ When NOT to clarify:
         messages = []
 
         # System prompt
-        system_prompt = self.build_system_prompt(skill_names)
+        system_prompt = self.build_system_prompt(skill_names, budget=system_prompt_budget)
         messages.append({"role": "system", "content": system_prompt})
 
         # History
