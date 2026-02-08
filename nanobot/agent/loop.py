@@ -562,6 +562,30 @@ class AgentLoop:
 
         return content or ""
 
+    # Patterns that indicate the LLM claims to have performed an action
+    _ACTION_CLAIM_PATTERN = re.compile(
+        r"\b(?:"
+        r"I(?:'ve| have) (?:updated|written|created|set up|configured|initialized"
+        r"|populated|added|installed|scheduled|removed|deleted|modified|saved"
+        r"|recorded|re-initialized|activated|established)"
+        r"|I (?:updated|wrote|created|set up|configured|initialized|populated"
+        r"|added|installed|scheduled|removed|deleted|modified|saved|activated)"
+        r"|(?:Changes|Updates|Modifications) (?:have been|were) (?:made|applied|saved)"
+        r"|(?:File|Config|Settings|Database) (?:has been|was) (?:updated|written|created)"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    def _contains_unverified_actions(self, content: str) -> bool:
+        """Detect if a response claims actions were performed.
+
+        Used to catch cases where the LLM describes actions in text
+        without actually calling tools.
+        """
+        if not content:
+            return False
+        return bool(self._ACTION_CLAIM_PATTERN.search(content))
+
     def _detect_clarification(self, content: str) -> bool:
         """Detect whether the response is a clarification request."""
         if not content:
@@ -873,12 +897,19 @@ class AgentLoop:
             else:
                 channel_context = memory_context
 
-        # For FACTUAL queries, inject a tool-use directive into the message
+        # For FACTUAL/ACTION queries, inject a tool-use directive into the message
         user_content = msg.content
         if intent == QueryIntent.FACTUAL:
             user_content = (
                 "[SYSTEM: This query requires verifiable facts. "
                 "You MUST use a tool to verify your answer.]\n\n" + user_content
+            )
+        elif intent == QueryIntent.ACTION:
+            user_content = (
+                "[SYSTEM: This is an action request. You MUST call the "
+                "appropriate tools to execute it. Do NOT describe actions "
+                "in text without calling tools. After calling a tool, check "
+                "its result before reporting success.]\n\n" + user_content
             )
 
         # Subagent visibility: inject running subagent count into context
@@ -902,11 +933,12 @@ class AgentLoop:
 
         # Determine tool_choice based on intent
         forced_tool_choice: str | None = None
-        if intent == QueryIntent.FACTUAL:
+        if intent in (QueryIntent.FACTUAL, QueryIntent.ACTION):
             forced_tool_choice = "required"
 
         # Agent loop
         iteration = 0
+        tools_called = 0
         final_content = None
 
         while iteration < self.max_iterations:
@@ -930,7 +962,7 @@ class AgentLoop:
                 metadata=msg.metadata,
             )
 
-            # Force tool use on first iteration for FACTUAL queries
+            # Force tool use on first iteration for FACTUAL/ACTION queries
             tc = forced_tool_choice if iteration == 1 else None
             async with self._tracer.span(
                 "llm_call",
@@ -949,6 +981,7 @@ class AgentLoop:
 
             # Handle tool calls
             if response.has_tool_calls:
+                tools_called += len(response.tool_calls)
                 # Add assistant message with tool calls
                 tool_call_dicts = [
                     {
@@ -1090,6 +1123,75 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        # Post-loop action verification: detect hallucinated actions.
+        # If the LLM claimed to perform actions but never called any tools,
+        # inject a correction and re-enter the loop once.
+        if (
+            intent == QueryIntent.ACTION
+            and tools_called == 0
+            and self._contains_unverified_actions(final_content)
+            and iteration < self.max_iterations
+        ):
+            logger.warning(
+                "Action response claimed actions without tool calls -- "
+                "re-entering loop with correction"
+            )
+            messages = self.context.add_assistant_message(messages, final_content)
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "[SYSTEM: Your previous response claimed to have performed "
+                        "actions (writing files, updating configs, etc.) but you did "
+                        "NOT call any tools. The actions did NOT happen. You MUST now "
+                        "call the appropriate tools to actually execute the requested "
+                        "actions. Do not describe -- execute.]"
+                    ),
+                }
+            )
+            # Single retry pass with forced tool use
+            response = await self.provider.chat(
+                messages=messages,
+                tools=self.tools.get_definitions(),
+                model=self.model,
+                temperature=self.tool_temperature,
+                tool_choice="required",
+            )
+            self._record_usage(response.usage, msg.session_key)
+
+            if response.has_tool_calls:
+                tool_call_dicts = [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": json.dumps(tc.arguments),
+                        },
+                    }
+                    for tc in response.tool_calls
+                ]
+                messages = self.context.add_assistant_message(
+                    messages, response.content, tool_call_dicts
+                )
+                for tool_call in response.tool_calls:
+                    result = await self.tools.execute(tool_call.name, tool_call.arguments)
+                    result = self._truncate_tool_result(result)
+                    messages = self.context.add_tool_result(
+                        messages, tool_call.id, tool_call.name, result
+                    )
+
+                # Get final response after tool execution
+                final_response = await self.provider.chat(
+                    messages=messages,
+                    tools=self.tools.get_definitions(),
+                    model=self.model,
+                    temperature=self.temperature,
+                )
+                self._record_usage(final_response.usage, msg.session_key)
+                if final_response.content:
+                    final_content = final_response.content
 
         # Save to session
         session.add_message("user", msg.content)

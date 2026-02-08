@@ -336,7 +336,30 @@ before telling the user. Memories are snapshots -- the actual state may differ.
 
     def _get_tool_usage_section(self, workspace_path: str) -> str:
         """Get the tool usage knowledge section."""
-        return f"""## Ground Truth First
+        return f"""## Action Integrity
+
+CRITICAL: When asked to perform an action (write a file, set up a cron job, update config,
+install something, etc.), you MUST call the appropriate tool. NEVER claim to have performed
+an action unless you actually called a tool and received a successful result.
+
+**Rules:**
+1. To write/update a file -> call `write_file` or `edit_file`. Saying "I updated X" without
+   calling a tool means the file was NOT changed.
+2. To create a cron job -> call `cron` tool. Describing the schedule is not the same as creating it.
+3. After calling a tool, CHECK THE RESULT before reporting success. If the tool returned an error,
+   report the error -- do not claim success.
+4. NEVER use phrases like "I have updated", "I've written", "I've configured" in your response
+   unless the corresponding tool call succeeded in this conversation turn.
+
+**Example -- WRONG behavior:**
+User: "Write my preferences to USER.md"
+You: "I have updated USER.md with your preferences." (NO tool was called -- file unchanged!)
+
+**Example -- CORRECT behavior:**
+User: "Write my preferences to USER.md"
+You: [call write_file tool] -> verify result -> "Done, I've written your preferences to USER.md."
+
+## Ground Truth First
 
 NEVER answer factual questions from memory or training data alone. For verifiable facts,
 you MUST use a tool to get the current, accurate answer.
