@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Leads - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>Lead Pipeline</h2>
+
+<table>
+    <thead>
+        <tr>
+            <th>Company</th>
+            <th>Signals</th>
+            <th>Avg Relevance</th>
+            <th>Tier</th>
+            <th>Top Signal</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for lead in leads %}
+        <tr>
+            <td><strong>{{ lead.company_name }}</strong></td>
+            <td>{{ lead.signal_count }}</td>
+            <td>{{ "%.0f" | format(lead.avg_relevance * 100) }}%</td>
+            <td>
+                <span class="tier-{{ lead.tier }}">{{ lead.tier }}</span>
+            </td>
+            <td>{{ lead.top_signal }}</td>
+        </tr>
+        {% endfor %}
+        {% if not leads %}
+        <tr><td colspan="5">No leads found.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

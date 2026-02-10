@@ -1440,5 +1440,75 @@ def reset(
         console.print("\nNo directories were removed.")
 
 
+# ============================================================================
+# Marketing Dashboard (serve)
+# ============================================================================
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Dashboard host"),
+    port: int = typer.Option(8080, "--port", "-p", help="Dashboard port"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Start the K&P Marketing web dashboard."""
+    import uvicorn
+
+    from nanobot.config.loader import load_config
+
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+
+    config = load_config()
+    marketing_cfg = config.marketing
+
+    # Override with config values if present
+    if marketing_cfg.web.host:
+        host = marketing_cfg.web.host
+    if marketing_cfg.web.port:
+        port = marketing_cfg.web.port
+
+    # Initialize marketing backends
+    from nanobot.marketing.consent import ConsentStore
+    from nanobot.marketing.intel_store import IntelStore
+    from nanobot.web.app import create_app
+    from nanobot.web.auth import AuthManager
+
+    data_dir = Path.home() / ".nanobot" / "data"
+    intel_store = IntelStore(db_path=data_dir / "intel.db")
+    consent_store = ConsentStore(db_path=data_dir / "consent.db")
+
+    # Pipedrive client (optional)
+    pipedrive_client = None
+    if marketing_cfg.pipedrive.enabled and marketing_cfg.pipedrive.api_token:
+        try:
+            from nanobot.marketing.pipedrive import PipedriveClient
+
+            pipedrive_client = PipedriveClient(
+                api_token=marketing_cfg.pipedrive.api_token,
+                api_url=marketing_cfg.pipedrive.api_url,
+            )
+        except ImportError:
+            console.print("[yellow]Pipedrive client not available[/yellow]")
+
+    auth_manager = AuthManager(
+        username=marketing_cfg.web.username,
+        password_hash=marketing_cfg.web.password_hash,
+        secret_key=marketing_cfg.web.secret_key or "nanobot-dev-key",
+    )
+
+    fastapi_app = create_app(
+        intel_store=intel_store,
+        pipedrive_client=pipedrive_client,
+        consent_store=consent_store,
+        auth_manager=auth_manager,
+    )
+
+    console.print(f"{__logo__} Starting K&P Marketing Dashboard on {host}:{port}...")
+    uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
+
+
 if __name__ == "__main__":
     app()

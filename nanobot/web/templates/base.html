@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="light">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}K&amp;P Marketing Assistant{% endblock %}</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+</head>
+<body>
+    <nav class="container-fluid">
+        <ul>
+            <li><strong>K&amp;P Marketing</strong></li>
+        </ul>
+        <ul>
+            <li><a href="/signals">Signals</a></li>
+            <li><a href="/leads">Leads</a></li>
+            <li><a href="/recommendations">Recommendations</a></li>
+            <li><a href="/reports">Reports</a></li>
+            <li><a href="/chat">Chat</a></li>
+            <li><a href="/settings">Settings</a></li>
+            <li><a href="/logout">Logout</a></li>
+        </ul>
+    </nav>
+    <main class="container">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="container">
+        <small>K&amp;P Marketing Assistant &mdash; Powered by Nanobot</small>
+    </footer>
+</body>
+</html>

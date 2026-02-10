@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Reports - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>Intelligence Reports</h2>
+
+<div>
+    <select onchange="window.location='?type='+this.value">
+        <option value="" {% if current_type == 'all' %}selected{% endif %}>All</option>
+        <option value="daily" {% if current_type == 'daily' %}selected{% endif %}>Daily</option>
+        <option value="weekly" {% if current_type == 'weekly' %}selected{% endif %}>Weekly</option>
+        <option value="monthly" {% if current_type == 'monthly' %}selected{% endif %}>Monthly</option>
+    </select>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Date</th>
+            <th>Type</th>
+            <th>Title</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for report in reports %}
+        <tr>
+            <td>{{ report.created_at }}</td>
+            <td>{{ report.report_type }}</td>
+            <td>{{ report.title }}</td>
+            <td>
+                <a href="/reports/{{ report.id }}">View</a>
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not reports %}
+        <tr><td colspan="4">No reports found.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

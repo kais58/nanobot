@@ -1,0 +1,20 @@
+/* K&P Marketing Assistant - Dashboard styles */
+
+.tier-hot { color: #d32f2f; font-weight: bold; }
+.tier-warm { color: #f57c00; font-weight: bold; }
+.tier-cold { color: #1565c0; }
+
+.badge-new { color: #2e7d32; font-weight: bold; }
+.badge-reviewed { color: #1565c0; }
+.badge-dismissed { color: #757575; }
+
+button.small, .small {
+    font-size: 0.85em;
+    padding: 0.25em 0.5em;
+}
+
+footer {
+    margin-top: 2rem;
+    text-align: center;
+    color: #757575;
+}

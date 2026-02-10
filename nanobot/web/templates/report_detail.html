@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Report - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>{{ report.title }}</h2>
+<p><small>{{ report.report_type }} &mdash; {{ report.created_at }}</small></p>
+<article>
+    {{ report.content | safe }}
+</article>
+<a href="/reports" role="button" class="outline">Back to Reports</a>
+{% endblock %}

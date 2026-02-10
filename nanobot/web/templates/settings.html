@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Settings - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>Settings</h2>
+
+<h3>Consultants</h3>
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Specializations</th>
+            <th>Industries</th>
+            <th>Regions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for c in consultants %}
+        <tr>
+            <td><strong>{{ c.name }}</strong></td>
+            <td>{{ c.specializations | join(", ") if c.specializations else "-" }}</td>
+            <td>{{ c.industries | join(", ") if c.industries else "-" }}</td>
+            <td>{{ c.regions | join(", ") if c.regions else "-" }}</td>
+        </tr>
+        {% endfor %}
+        {% if not consultants %}
+        <tr><td colspan="4">No consultants configured.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

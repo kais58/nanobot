@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Signals - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>Market Signals</h2>
+
+<div class="grid">
+    <div>
+        <label>Status</label>
+        <select onchange="window.location='?status='+this.value">
+            <option value="" {% if current_status == 'all' %}selected{% endif %}>All</option>
+            <option value="new" {% if current_status == 'new' %}selected{% endif %}>New</option>
+            <option value="reviewed" {% if current_status == 'reviewed' %}selected{% endif %}>Reviewed</option>
+            <option value="dismissed" {% if current_status == 'dismissed' %}selected{% endif %}>Dismissed</option>
+        </select>
+    </div>
+    <div>
+        <label>Type</label>
+        <select onchange="window.location='?type='+this.value">
+            <option value="" {% if current_type == 'all' %}selected{% endif %}>All</option>
+            <option value="restructuring">Restructuring</option>
+            <option value="leadership_change">Leadership Change</option>
+            <option value="ma">M&amp;A</option>
+            <option value="digital_transformation">Digital Transformation</option>
+            <option value="expansion">Expansion</option>
+            <option value="cost_cutting">Cost Cutting</option>
+        </select>
+    </div>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Company</th>
+            <th>Type</th>
+            <th>Title</th>
+            <th>Relevance</th>
+            <th>Status</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for signal in signals %}
+        <tr>
+            <td><strong>{{ signal.company_name }}</strong></td>
+            <td>{{ signal.signal_type }}</td>
+            <td>
+                {{ signal.title }}
+                {% if signal.source_url %}
+                <br><small><a href="{{ signal.source_url }}" target="_blank">{{ signal.source_name }}</a></small>
+                {% endif %}
+            </td>
+            <td>{{ "%.0f" | format(signal.relevance_score * 100) }}%</td>
+            <td>
+                <span class="badge-{{ signal.status }}">{{ signal.status }}</span>
+            </td>
+            <td>
+                {% if signal.status == 'new' %}
+                <form method="post" action="/signals/{{ signal.id }}/review" style="display:inline">
+                    <input type="hidden" name="status" value="reviewed">
+                    <button type="submit" class="outline small">Review</button>
+                </form>
+                <form method="post" action="/signals/{{ signal.id }}/review" style="display:inline">
+                    <input type="hidden" name="status" value="dismissed">
+                    <button type="submit" class="outline secondary small">Dismiss</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not signals %}
+        <tr><td colspan="6">No signals found.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}

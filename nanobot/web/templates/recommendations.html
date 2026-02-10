@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Recommendations - K&amp;P Marketing{% endblock %}
+{% block content %}
+<h2>Outreach Recommendations</h2>
+
+<div>
+    <select onchange="window.location='?status='+this.value">
+        <option value="" {% if current_status == 'all' %}selected{% endif %}>All</option>
+        <option value="pending" {% if current_status == 'pending' %}selected{% endif %}>Pending</option>
+        <option value="approved" {% if current_status == 'approved' %}selected{% endif %}>Approved</option>
+        <option value="sent" {% if current_status == 'sent' %}selected{% endif %}>Sent</option>
+        <option value="rejected" {% if current_status == 'rejected' %}selected{% endif %}>Rejected</option>
+    </select>
+</div>
+
+<table>
+    <thead>
+        <tr>
+            <th>Company</th>
+            <th>Service Area</th>
+            <th>Consultant</th>
+            <th>Channel</th>
+            <th>Status</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for rec in recommendations %}
+        <tr>
+            <td><strong>{{ rec.company_name }}</strong></td>
+            <td>{{ rec.service_area }}</td>
+            <td>{{ rec.consultant_name or "Unassigned" }}</td>
+            <td>{{ rec.outreach_channel }}</td>
+            <td>{{ rec.status }}</td>
+            <td>
+                {% if rec.status == 'pending' %}
+                <form method="post" action="/recommendations/{{ rec.id }}/approve" style="display:inline">
+                    <button type="submit" class="outline small">Approve</button>
+                </form>
+                <form method="post" action="/recommendations/{{ rec.id }}/reject" style="display:inline">
+                    <button type="submit" class="outline secondary small">Reject</button>
+                </form>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not recommendations %}
+        <tr><td colspan="6">No recommendations found.</td></tr>
+        {% endif %}
+    </tbody>
+</table>
+{% endblock %}
