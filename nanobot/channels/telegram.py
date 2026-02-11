@@ -193,6 +193,39 @@ class TelegramChannel(BaseChannel):
             reply_markup = None
             if msg.components:
                 reply_markup = self._build_telegram_keyboard(msg.components)
+
+            # Handle media attachments
+            if msg.media:
+                for media_path in msg.media:
+                    try:
+                        from pathlib import Path
+                        path = Path(media_path)
+                        if not path.exists():
+                            logger.warning(f"Media file not found: {media_path}")
+                            continue
+
+                        # Determine if it's a photo or document
+                        ext = path.suffix.lower()
+                        if ext in ('.jpg', '.jpeg', '.png', '.gif', '.webp'):
+                            await self._app.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=open(media_path, 'rb'),
+                                caption=html_content if media_path == msg.media[0] else None,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup if media_path == msg.media[-1] else None,
+                            )
+                        else:
+                            await self._app.bot.send_document(
+                                chat_id=chat_id,
+                                document=open(media_path, 'rb'),
+                                caption=html_content if media_path == msg.media[0] else None,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup if media_path == msg.media[-1] else None,
+                            )
+                    except Exception as e:
+                        logger.error(f"Failed to send media {media_path}: {e}")
+                return
+
             await self._app.bot.send_message(
                 chat_id=chat_id,
                 text=html_content,
