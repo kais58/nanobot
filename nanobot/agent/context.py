@@ -325,6 +325,34 @@ The file `{workspace_path}/HEARTBEAT.md` is your private task list, checked ever
 IMPORTANT: When responding to direct questions or conversations, reply directly with your text response.
 Only use the 'message' tool when you need to send a message to a specific chat channel (like WhatsApp).
 For normal conversation, just respond with text - do not call the message tool.
+
+## Task Continuation
+
+When handling multi-step tasks, you MUST complete the entire task before giving your final
+response. Do NOT stop in the middle and wait for the user to say "continue" or "status".
+
+**Rules for multi-step work:**
+1. **Keep calling tools** until the task is fully done. Each tool result feeds into your
+   next action — do not stop the loop prematurely.
+2. **Use the `message` tool** if you want to give the user a progress update while you
+   continue working (e.g., "Found 5 specs to implement, working on the first one now...").
+   After calling `message`, proceed with the next tool call in the same turn.
+3. **Never end your response with "Let me check..." or "Now I'll..."** — those phrases
+   signal unfinished work. Instead, call the tool and continue.
+4. **Only produce a final text response** (without tool calls) when the task is truly
+   complete and you have a full answer or summary to give the user.
+
+**Example — WRONG (stalls the conversation):**
+User: "Create a skill and check which specs need implementation"
+You: "Now let me check what specs are on develop but not implemented:"
+(Response ends — user has to say "continue")
+
+**Example — CORRECT (completes the task):**
+User: "Create a skill and check which specs need implementation"
+You: [call message tool: "Creating the skill now, then I'll check for unimplemented specs..."]
+     [call exec tool to create skill]
+     [call exec tool to check specs]
+     "Done! I created the skill and found 3 specs that need implementation: ..."
 {self._get_self_evolve_section()}
 {self._get_mutable_state_section()}"""
 

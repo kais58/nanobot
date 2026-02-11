@@ -757,8 +757,53 @@ class AgentLoop:
                 if chunk.usage:
                     self._record_usage(chunk.usage, f"{channel}:{chat_id}")
                 break
+        # If the model mistakenly emits XML-style <tool_call> blocks in the
+        # final streamed content, strip them so users never see raw XML.
+        if content and "<tool_call>" in content:
+            cleaned = _strip_tool_call_blocks_from_content(content)
+            # #region agent log
+            try:
+                _log_path = Path("/root/.nanobot/.cursor/debug.log")
+                _entry = {
+                    "id": f"log_{int(time.time()*1000)}_loop_stream_final",
+                    "timestamp": int(time.time()*1000),
+                    "location": "nanobot/agent/loop.py:stream_final",
+                    "message": "Streaming final content XML strip",
+                    "data": {
+                        "original_has_xml": "<tool_call>" in content,
+                        "cleaned_has_xml": "<tool_call>" in cleaned,
+                        "cleaned_prefix": (cleaned or "")[:220],
+                    },
+                    "runId": "initial",
+                    "hypothesisId": "H6",
+                }
+                with _log_path.open("a", encoding="utf-8") as _f:
+                    _f.write(json.dumps(_entry) + "\n")
+            except Exception:
+                pass
+            # #endregion agent log
+            content = cleaned
 
         return content or ""
+
+    # Patterns indicating the LLM intends to continue working (not a final response)
+    _CONTINUATION_PATTERN = re.compile(
+        r"\b(?:"
+        r"(?:Now )?[Ll]et me (?:check|look|search|find|investigate|continue|proceed|verify"
+        r"|examine|analyze|review|scan|fetch|query|see|start|do|run|try|create|set up"
+        r"|work on|figure out|dig into|pull up|look into)"
+        r"|I'?ll (?:now |also |then |first |next )?(?:check|look|search|find|investigate"
+        r"|continue|proceed|verify|examine|analyze|review|scan|fetch|query|see|start|do"
+        r"|run|try|create|set up|work on|figure out|dig into|pull up|look into)"
+        r"|(?:Checking|Looking|Searching|Finding|Investigating|Continuing|Proceeding"
+        r"|Verifying|Examining|Analyzing|Reviewing|Scanning|Fetching|Querying"
+        r"|Working on|Processing|Running|Executing|Starting|Setting up)"
+        r"|(?:First|Next|Then|Now),? (?:let me|I'?ll|I need to|I should|I will|I want to)"
+        r"|(?:One moment|Hold on|Give me a (?:moment|second|sec))"
+        r"|(?:now (?:let me|I need to|I should|checking|looking))"
+        r")\b",
+        re.IGNORECASE,
+    )
 
     # Patterns that indicate the LLM claims to have performed an action
     _ACTION_CLAIM_PATTERN = re.compile(
@@ -773,6 +818,39 @@ class AgentLoop:
         r")\b",
         re.IGNORECASE,
     )
+
+    def _needs_continuation(self, content: str, finish_reason: str | None = None) -> bool:
+        """Detect if a response indicates the agent wants to continue working.
+
+        Returns True when:
+        - The response was truncated due to token limits (finish_reason='length')
+        - The response contains continuation language ('Let me check...', 'Now I\'ll...')
+          AND ends with such language (not just mentioning it in passing)
+
+        This allows the agent loop to self-prompt instead of stopping prematurely.
+        """
+        # Token limit truncation always warrants continuation
+        if finish_reason == "length":
+            return True
+
+        if not content:
+            return False
+
+        # Check if the response ends with continuation language
+        # (not just contains it somewhere in the middle of a complete answer)
+        # Look at the last ~200 chars to check if the ending signals more work
+        tail = content[-200:].strip() if len(content) > 200 else content.strip()
+
+        # If the tail ends with a colon, it's likely introducing a list/result
+        # that got cut off, or announcing next steps
+        if tail.endswith(":"):
+            return True
+
+        # Check if continuation language appears in the tail
+        if self._CONTINUATION_PATTERN.search(tail):
+            return True
+
+        return False
 
     def _contains_unverified_actions(self, content: str) -> bool:
         """Detect if a response claims actions were performed.
@@ -1173,13 +1251,43 @@ class AgentLoop:
             # Record token usage
             self._record_usage(response.usage, msg.session_key)
 
+            # #region agent log
+            try:
+                _log_path = Path("/root/.nanobot/.cursor/debug.log")
+                _log_path.parent.mkdir(parents=True, exist_ok=True)
+                _c = response.content or ""
+                _entry = {"id": f"log_{int(time.time()*1000)}_loop_after_llm", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:after_llm", "message": "Response after LLM", "data": {"has_tool_calls": response.has_tool_calls, "content_has_xml": "<tool_call>" in _c, "content_len": len(_c), "content_prefix": _c[:220]}, "runId": "initial", "hypothesisId": "H1"}
+                with _log_path.open("a", encoding="utf-8") as _f:
+                    _f.write(json.dumps(_entry) + "\n")
+            except Exception:
+                pass
+            # #endregion agent log
+
             # Fallback: some models emit tool calls as XML in content instead of structured tool_calls
             if not response.has_tool_calls and response.content and "<tool_call>" in response.content:
                 parsed = _parse_tool_calls_from_content(response.content)
+                # #region agent log
+                try:
+                    _log_path = Path("/root/.nanobot/.cursor/debug.log")
+                    _entry = {"id": f"log_{int(time.time()*1000)}_loop_parse", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:parse", "message": "XML parse result", "data": {"parsed_len": len(parsed), "content_has_xml": True}, "runId": "initial", "hypothesisId": "H2"}
+                    with _log_path.open("a", encoding="utf-8") as _f:
+                        _f.write(json.dumps(_entry) + "\n")
+                except Exception:
+                    pass
+                # #endregion agent log
                 if parsed:
                     logger.debug(f"Parsed {len(parsed)} tool call(s) from response content")
                     # Strip XML blocks so we do not store or send raw tool_call tags to the user
                     cleaned_content = _strip_tool_call_blocks_from_content(response.content)
+                    # #region agent log
+                    try:
+                        _log_path = Path("/root/.nanobot/.cursor/debug.log")
+                        _entry = {"id": f"log_{int(time.time()*1000)}_loop_fallback", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:fallback", "message": "XML fallback applied", "data": {"parsed_len": len(parsed), "cleaned_has_xml": "<tool_call>" in (cleaned_content or ""), "cleaned_prefix": (cleaned_content or "")[:180]}, "runId": "initial", "hypothesisId": "H2"}
+                        with _log_path.open("a", encoding="utf-8") as _f:
+                            _f.write(json.dumps(_entry) + "\n")
+                    except Exception:
+                        pass
+                    # #endregion agent log
                     response = LLMResponse(
                         content=cleaned_content,
                         tool_calls=parsed,
@@ -1365,20 +1473,89 @@ class AgentLoop:
                 # Post-iteration compaction check (once per iteration, not per tool)
                 messages = await self._maybe_compact(messages, session)
             else:
-                # No tool calls -- final response
+                # No tool calls -- check if this is truly a final response
+                # or if the agent signaled it wants to continue working.
+                # #region agent log
+                try:
+                    _log_path = Path("/root/.nanobot/.cursor/debug.log")
+                    _c = response.content or ""
+                    _entry = {"id": f"log_{int(time.time()*1000)}_loop_no_tool_calls", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:no_tool_calls", "message": "No tool calls branch", "data": {"content_has_xml": "<tool_call>" in _c, "content_prefix": _c[:220], "streaming_enabled": self._streaming_config.enabled}, "runId": "initial", "hypothesisId": "H3"}
+                    with _log_path.open("a", encoding="utf-8") as _f:
+                        _f.write(json.dumps(_entry) + "\n")
+                except Exception:
+                    pass
+                # #endregion agent log
+
+                # Auto-continuation: if the response indicates ongoing work,
+                # send the intermediate message and self-prompt to continue.
+                if (
+                    iteration < self.max_iterations
+                    and response.content
+                    and self._needs_continuation(
+                        response.content, response.finish_reason
+                    )
+                ):
+                    logger.info(
+                        f"Auto-continuation triggered at iteration {iteration} "
+                        f"(finish_reason={response.finish_reason})"
+                    )
+                    # Send the intermediate message to the user immediately
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=response.content,
+                            metadata=msg.metadata,
+                        )
+                    )
+                    # Add to conversation history and inject self-prompt
+                    messages = self.context.add_assistant_message(
+                        messages, response.content
+                    )
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: You indicated you had more work to do. "
+                                "Continue with your task. Call the appropriate tools "
+                                "to proceed. When you are fully done, provide your "
+                                "final summary.]"
+                            ),
+                        }
+                    )
+                    # Compact if needed after injecting continuation
+                    messages = await self._maybe_compact(messages, session)
+                    continue  # Re-enter the while loop
+
                 if self._streaming_config.enabled:
-                    final_content = await self._stream_final_response(
+                    streamed_content = await self._stream_final_response(
                         messages,
                         msg.channel,
                         msg.chat_id,
                         msg.metadata,
                     )
+                    # If streaming produced nothing usable (e.g. only XML tool_call
+                    # blocks that were stripped), fall back to the original
+                    # non-streamed response content so the user still sees an
+                    # answer instead of a blank message.
+                    final_content = streamed_content or (response.content or "")
                 else:
                     final_content = response.content
                 break
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
+
+        # #region agent log
+        try:
+            _log_path = Path("/root/.nanobot/.cursor/debug.log")
+            _fc = final_content or ""
+            _entry = {"id": f"log_{int(time.time()*1000)}_loop_final", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:final_content", "message": "Final content before return", "data": {"final_has_xml": "<tool_call>" in _fc, "final_prefix": _fc[:220]}, "runId": "initial", "hypothesisId": "H3"}
+            with _log_path.open("a", encoding="utf-8") as _f:
+                _f.write(json.dumps(_entry) + "\n")
+        except Exception:
+            pass
+        # #endregion agent log
 
         # Post-loop action verification: detect hallucinated actions.
         # If the LLM claimed to perform actions but never called any tools,
