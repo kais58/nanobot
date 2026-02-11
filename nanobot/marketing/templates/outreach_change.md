@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 mit Interesse haben wir zur Kenntnis genommen, dass {{ company_name }} aktuell einen bedeutenden Veraenderungsprozess durchlaeuft{% if signal_description %}: {{ signal_description }}{% endif %}.
 

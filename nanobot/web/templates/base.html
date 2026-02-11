@@ -18,7 +18,7 @@
             <li><a href="/leads">Leads</a></li>
             <li><a href="/recommendations">Recommendations</a></li>
             <li><a href="/reports">Reports</a></li>
-            <li><a href="/chat">Chat</a></li>
+            <li><a href="javascript:void(0)" onclick="openChat()">Chat</a></li>
             <li><a href="/settings">Settings</a></li>
             <li><a href="/logout">Logout</a></li>
         </ul>
@@ -26,8 +26,21 @@
     <main class="container">
         {% block content %}{% endblock %}
     </main>
+    <!-- Chat sidebar -->
+    <aside id="chat-sidebar" class="chat-sidebar hidden">
+        <div class="chat-header">
+            <span id="chat-title">Chat with Nano</span>
+            <button class="chat-close" onclick="closeSidebar()">&times;</button>
+        </div>
+        <div id="chat-messages" class="chat-messages"></div>
+        <div class="chat-input-area">
+            <textarea id="chat-input" placeholder="Type a message..." rows="2"></textarea>
+            <button onclick="sendMessage()">Send</button>
+        </div>
+    </aside>
     <footer class="container">
         <small>K&amp;P Marketing Assistant &mdash; Powered by Nanobot</small>
     </footer>
+    <script src="/static/chat.js"></script>
 </body>
 </html>

@@ -17,10 +17,10 @@
 
 {% for lead in top_leads[:10] %}
 ### {{ loop.index }}. {{ lead.company_name }}
-- **Score:** {{ "%.0f" | format(lead.score * 100) }}%
+- **Score:** {{ "%.0f" | format(lead.total_score * 100) }}%
 - **Tier:** {{ lead.tier }}
 - **Signale:** {{ lead.signal_count }}
-- **Empfohlener Berater:** {{ lead.consultant or "nicht zugewiesen" }}
+- **Empfohlener Berater:** {{ lead.recommended_services|join(', ') or "nicht zugewiesen" }}
 {% endfor %}
 
 ## Empfehlungsstatus

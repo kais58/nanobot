@@ -34,7 +34,7 @@ class CRMTool(Tool):
             "Actions: search_leads, create_lead, add_signal, get_signals, "
             "get_recommendations, approve_recommendation, log_activity, "
             "get_consultants, add_consultant, sync_pipedrive, "
-            "gdpr_delete."
+            "gdpr_delete, get_outreach_status, list_outreach_tracking."
         )
 
     @property
@@ -56,6 +56,8 @@ class CRMTool(Tool):
                         "add_consultant",
                         "sync_pipedrive",
                         "gdpr_delete",
+                        "get_outreach_status",
+                        "list_outreach_tracking",
                     ],
                     "description": "Action to perform",
                 },
@@ -150,6 +152,11 @@ class CRMTool(Tool):
                     "type": "integer",
                     "description": "Max results to return",
                 },
+                "heat_status": {
+                    "type": "string",
+                    "enum": ["hot", "warm", "cold"],
+                    "description": "Filter outreach by heat status",
+                },
             },
             "required": ["action"],
         }
@@ -178,6 +185,10 @@ class CRMTool(Tool):
                 return await self._sync_pipedrive()
             elif action == "gdpr_delete":
                 return self._gdpr_delete(**kwargs)
+            elif action == "get_outreach_status":
+                return self._get_outreach_status(**kwargs)
+            elif action == "list_outreach_tracking":
+                return self._list_outreach_tracking(**kwargs)
             else:
                 return f"Error: Unknown action '{action}'"
         except Exception as e:
@@ -440,3 +451,39 @@ class CRMTool(Tool):
 
         stats = self._consent.gdpr_delete(email)
         return f"GDPR deletion complete for {email}: {json.dumps(stats)}"
+
+    def _get_outreach_status(self, recommendation_id: int = 0, **kw: Any) -> str:
+        if not self._store:
+            return "Error: Intelligence store not configured"
+        if not recommendation_id:
+            return "Error: recommendation_id is required"
+        tracking = self._store.get_outreach_tracking(recommendation_id)
+        if not tracking:
+            return f"No outreach tracking found for recommendation {recommendation_id}"
+        return (
+            f"Outreach for recommendation {recommendation_id}:\n"
+            f"- Company: {tracking.get('company_name', 'N/A')}\n"
+            f"- Sent: {tracking.get('sent_at', 'N/A')}\n"
+            f"- Status: {tracking.get('response_status', 'N/A')}\n"
+            f"- Heat: {tracking.get('heat_status', 'N/A')}\n"
+            f"- Responded: {tracking.get('responded_at', 'N/A')}"
+        )
+
+    def _list_outreach_tracking(self, status: str = "", limit: int = 20, **kw: Any) -> str:
+        if not self._store:
+            return "Error: Intelligence store not configured"
+        tracking_list = self._store.get_all_outreach_tracking(
+            heat_status=status or None, limit=limit
+        )
+        if not tracking_list:
+            return "No outreach tracking records found."
+        lines = [f"Outreach tracking ({len(tracking_list)}):\n"]
+        for t in tracking_list:
+            lines.append(
+                f"- Rec #{t.get('recommendation_id')}: "
+                f"{t.get('company_name')} "
+                f"[{t.get('heat_status')}] "
+                f"{t.get('response_status')} "
+                f"(sent: {(t.get('sent_at') or '')[:10]})"
+            )
+        return "\n".join(lines)

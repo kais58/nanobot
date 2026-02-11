@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 {{ company_name }} steht offenbar vor wichtigen strategischen Entscheidungen{% if signal_description %}: {{ signal_description }}{% endif %}.
 

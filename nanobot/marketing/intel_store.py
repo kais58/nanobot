@@ -75,6 +75,20 @@ class IntelStore:
                 delivered_to TEXT DEFAULT ''
             );
 
+            CREATE TABLE IF NOT EXISTS outreach_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recommendation_id INTEGER REFERENCES recommendations(id),
+                company_name TEXT NOT NULL,
+                contact_email TEXT DEFAULT '',
+                sent_at TEXT NOT NULL,
+                follow_up_at TEXT DEFAULT '',
+                responded_at TEXT DEFAULT '',
+                response_status TEXT DEFAULT 'awaiting',
+                heat_status TEXT DEFAULT 'warm',
+                notes TEXT DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_signals_status
                 ON signals(status);
             CREATE INDEX IF NOT EXISTS idx_signals_type
@@ -246,6 +260,112 @@ class IntelStore:
         self._conn.commit()
         return cursor.rowcount > 0
 
+    # --- Single record fetches ---
+
+    def get_recommendation(self, rec_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute("SELECT * FROM recommendations WHERE id = ?", (rec_id,)).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    # --- Outreach Tracking ---
+
+    def create_outreach_tracking(
+        self,
+        recommendation_id: int,
+        company_name: str,
+        contact_email: str = "",
+    ) -> dict[str, Any]:
+        now = datetime.utcnow().isoformat()
+        cursor = self._conn.execute(
+            """INSERT INTO outreach_tracking
+            (recommendation_id, company_name, contact_email, sent_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)""",
+            (recommendation_id, company_name, contact_email, now, now),
+        )
+        self._conn.commit()
+        return self._row_to_dict(
+            self._conn.execute(
+                "SELECT * FROM outreach_tracking WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+        )
+
+    def update_outreach_response(
+        self,
+        recommendation_id: int,
+        responded: bool = True,
+    ) -> bool:
+        now = datetime.utcnow().isoformat()
+        row = self._conn.execute(
+            "SELECT * FROM outreach_tracking WHERE recommendation_id = ?",
+            (recommendation_id,),
+        ).fetchone()
+        if not row:
+            return False
+        tracking = self._row_to_dict(row)
+        if responded:
+            # Calculate heat based on response time
+            sent_at = tracking.get("sent_at", "")
+            heat = "warm"
+            if sent_at:
+                try:
+                    sent_dt = datetime.fromisoformat(sent_at)
+                    days_elapsed = (datetime.utcnow() - sent_dt).days
+                    if days_elapsed <= 3:
+                        heat = "hot"
+                    elif days_elapsed <= 7:
+                        heat = "warm"
+                    else:
+                        heat = "warm"  # Responded after being cold -> warm
+                except (ValueError, TypeError):
+                    pass
+            self._conn.execute(
+                """UPDATE outreach_tracking
+                SET responded_at = ?, response_status = 'responded',
+                    heat_status = ?, updated_at = ?
+                WHERE recommendation_id = ?""",
+                (now, heat, now, recommendation_id),
+            )
+        self._conn.commit()
+        return True
+
+    def get_outreach_tracking(self, recommendation_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM outreach_tracking WHERE recommendation_id = ?",
+            (recommendation_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_all_outreach_tracking(
+        self,
+        heat_status: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM outreach_tracking WHERE 1=1"
+        params: list[Any] = []
+        if heat_status:
+            query += " AND heat_status = ?"
+            params.append(heat_status)
+        query += " ORDER BY sent_at DESC LIMIT ?"
+        params.append(limit)
+        rows = self._conn.execute(query, params).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def update_stale_outreach(self) -> int:
+        """Mark outreach with no response after 7 days as cold."""
+        from datetime import timedelta
+
+        cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+        now = datetime.utcnow().isoformat()
+        cursor = self._conn.execute(
+            """UPDATE outreach_tracking
+            SET heat_status = 'cold', response_status = 'no_response',
+                updated_at = ?
+            WHERE response_status = 'awaiting' AND sent_at < ?""",
+            (now, cutoff),
+        )
+        self._conn.commit()
+        return cursor.rowcount
+
     # --- Consultants ---
 
     def add_consultant(
@@ -339,6 +459,13 @@ class IntelStore:
         params.append(limit)
         rows = self._conn.execute(query, params).fetchall()
         return [self._row_to_dict(r) for r in rows]
+
+    def get_report(self, report_id: int) -> dict[str, Any] | None:
+        row = self._conn.execute(
+            "SELECT * FROM intelligence_reports WHERE id = ?",
+            (report_id,),
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
 
     # --- Stats ---
 

@@ -41,8 +41,8 @@ RUN mkdir -p /root/.nanobot /app/workspace
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# Gateway default port
-EXPOSE 18790
+# Gateway default port + web dashboard
+EXPOSE 18790 8080
 
 # Default environment
 ENV NANOBOT_WORKSPACE=/app/workspace

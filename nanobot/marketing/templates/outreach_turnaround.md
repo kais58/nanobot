@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 die aktuellen Entwicklungen bei {{ company_name }}{% if signal_description %} -- {{ signal_description }} --{% endif %} erfordern entschlossenes und gleichzeitig umsichtiges Handeln.
 

@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 die Optimierung von Geschaeftsprozessen ist ein zentraler Hebel fuer nachhaltige Wettbewerbsfaehigkeit{% if signal_description %} -- ein Thema, das offenbar auch fuer {{ company_name }} relevant ist: {{ signal_description }}{% endif %}.
 

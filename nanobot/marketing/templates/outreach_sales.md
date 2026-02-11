@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 der Vertrieb ist das Herzstueck jedes Unternehmens{% if signal_description %} -- und die aktuellen Entwicklungen bei {{ company_name }} ({{ signal_description }}) bieten Chancen, diesen gezielt weiterzuentwickeln{% endif %}.
 

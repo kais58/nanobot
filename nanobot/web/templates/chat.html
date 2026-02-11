@@ -3,7 +3,11 @@
 {% block content %}
 <h2>Agent Chat</h2>
 <article>
-    <p>WebSocket-based chat will be available in a future update.
-    Use Telegram for now to interact with the agent.</p>
+    <p>Click the button below or use "Chat" in the navigation to open the chat sidebar.</p>
+    <button onclick="openChat()">Open Chat</button>
 </article>
+<script>
+    // Auto-open sidebar when visiting /chat
+    document.addEventListener('DOMContentLoaded', function() { openChat(); });
+</script>
 {% endblock %}

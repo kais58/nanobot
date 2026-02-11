@@ -1,4 +1,4 @@
-Sehr geehrte/r {{ anrede }} {{ nachname }},
+Sehr geehrte/r {{ anrede|default('Frau/Herr') }} {{ nachname|default('') }},
 
 Fuehrungswechsel und neue Teamkonstellationen sind entscheidende Momente fuer Unternehmen{% if signal_description %} -- so auch bei {{ company_name }}: {{ signal_description }}{% endif %}.
 

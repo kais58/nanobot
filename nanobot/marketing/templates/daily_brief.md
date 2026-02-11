@@ -8,7 +8,7 @@
 - **Relevanz:** {{ "%.0f" | format(signal.relevance_score * 100) }}%
 - **K&P Match:** {{ signal.kp_service_match or "nicht zugeordnet" }}
 - **Quelle:** [{{ signal.source_name }}]({{ signal.source_url }})
-- **Erkannt:** {{ signal.detected_at[:10] }}
+- **Erkannt:** {{ (signal.detected_at or '')[:10] }}
 {% endfor %}
 
 ## Offene Empfehlungen ({{ recommendations | length }})

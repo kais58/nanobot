@@ -16,6 +16,9 @@ def create_app(
     pipedrive_client: Any = None,
     consent_store: Any = None,
     auth_manager: AuthManager | None = None,
+    message_bus: Any = None,
+    agent: Any = None,
+    web_channel: Any = None,
 ) -> FastAPI:
     """Create the FastAPI dashboard application."""
     app = FastAPI(
@@ -29,6 +32,9 @@ def create_app(
     app.state.pipedrive = pipedrive_client
     app.state.consent = consent_store
     app.state.auth = auth_manager or AuthManager()
+    app.state.message_bus = message_bus
+    app.state.agent = agent
+    app.state.web_channel = web_channel
 
     # Static files and templates
     static_dir = Path(__file__).parent / "static"

@@ -21,8 +21,10 @@ services:
       # Workspace path inside container
       - NANOBOT_WORKSPACE=/app/workspace
     ports:
-      # Gateway port (optional, for HTTP API)
+      # Gateway port (HTTP API)
       - "18790:18790"
+      # Web dashboard (embedded in gateway)
+      - "8080:8080"
     # For WhatsApp bridge headless browser support
     # Uncomment if using WhatsApp channel
     # shm_size: '2gb'

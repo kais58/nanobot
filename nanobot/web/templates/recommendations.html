@@ -21,6 +21,7 @@
             <th>Consultant</th>
             <th>Channel</th>
             <th>Status</th>
+            <th>Tracking</th>
             <th>Actions</th>
         </tr>
     </thead>
@@ -33,6 +34,12 @@
             <td>{{ rec.outreach_channel }}</td>
             <td>{{ rec.status }}</td>
             <td>
+                {% if rec.tracking %}
+                <span class="tier-{{ rec.tracking.heat_status }}">{{ rec.tracking.heat_status }}</span>
+                <br><small>{{ rec.tracking.response_status }}</small>
+                {% endif %}
+            </td>
+            <td>
                 {% if rec.status == 'pending' %}
                 <form method="post" action="/recommendations/{{ rec.id }}/approve" style="display:inline">
                     <button type="submit" class="outline small">Approve</button>
@@ -40,12 +47,25 @@
                 <form method="post" action="/recommendations/{{ rec.id }}/reject" style="display:inline">
                     <button type="submit" class="outline secondary small">Reject</button>
                 </form>
+                {% elif rec.status == 'approved' %}
+                <a href="/recommendations/{{ rec.id }}/compose" class="outline small" role="button">Compose Email</a>
+                <form method="post" action="/recommendations/{{ rec.id }}/back-to-pending" style="display:inline">
+                    <button type="submit" class="outline secondary small">Back to Pending</button>
+                </form>
+                {% elif rec.status == 'sent' %}
+                <form method="post" action="/recommendations/{{ rec.id }}/response-received" style="display:inline">
+                    <button type="submit" class="outline small">Response Received</button>
+                </form>
+                <form method="post" action="/recommendations/{{ rec.id }}/no-response" style="display:inline">
+                    <button type="submit" class="outline secondary small">No Response</button>
+                </form>
                 {% endif %}
+                <button class="outline small" onclick="openChat('recommendation', {{ rec.id }})">Discuss</button>
             </td>
         </tr>
         {% endfor %}
         {% if not recommendations %}
-        <tr><td colspan="6">No recommendations found.</td></tr>
+        <tr><td colspan="7">No recommendations found.</td></tr>
         {% endif %}
     </tbody>
 </table>

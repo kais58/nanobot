@@ -104,7 +104,10 @@ class MarketReportTool(Tool):
         return content
 
     def _weekly_report(self) -> str:
+        from collections import defaultdict
         from datetime import datetime, timedelta
+
+        from nanobot.marketing.scoring import LeadScorer
 
         now = datetime.utcnow()
         week_start = (now - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -120,9 +123,27 @@ class MarketReportTool(Tool):
             s = r.get("status", "pending")
             if s in rec_stats:
                 rec_stats[s] += 1
+
+        # Compute top leads using LeadScorer
+        scorer = LeadScorer()
+        by_company: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for sig in signals:
+            by_company[sig.get("company_name", "")].append(sig)
+        scored_leads = [scorer.score_lead(name, sigs) for name, sigs in by_company.items()]
+        top_leads = [
+            {
+                "company_name": lead.company_name,
+                "total_score": lead.total_score,
+                "tier": lead.tier,
+                "signal_count": lead.signal_count,
+                "recommended_services": lead.recommended_services,
+            }
+            for lead in sorted(scored_leads, key=lambda x: x.total_score, reverse=True)[:10]
+        ]
+
         content = self._generator.generate_weekly_report(
             signals=signals,
-            top_leads=[],
+            top_leads=top_leads,
             recommendation_stats=rec_stats,
             week_start=week_start,
             week_end=week_end,
@@ -153,10 +174,9 @@ class MarketReportTool(Tool):
     def _get_report(self, report_id: int | None) -> str:
         if not report_id:
             return "Error: report_id is required"
-        reports = self._store.get_reports(limit=100)
-        for r in reports:
-            if r["id"] == report_id:
-                return r.get("content", "Empty report")
+        report = self._store.get_report(report_id)
+        if report:
+            return report.get("content", "Empty report")
         return f"Error: Report {report_id} not found"
 
     def _render_outreach(

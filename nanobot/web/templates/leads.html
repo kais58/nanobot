@@ -11,6 +11,7 @@
             <th>Avg Relevance</th>
             <th>Tier</th>
             <th>Top Signal</th>
+            <th>Actions</th>
         </tr>
     </thead>
     <tbody>
@@ -23,10 +24,13 @@
                 <span class="tier-{{ lead.tier }}">{{ lead.tier }}</span>
             </td>
             <td>{{ lead.top_signal }}</td>
+            <td>
+                <button class="outline small" onclick="openChat('lead', '{{ lead.company_name }}')">Discuss</button>
+            </td>
         </tr>
         {% endfor %}
         {% if not leads %}
-        <tr><td colspan="5">No leads found.</td></tr>
+        <tr><td colspan="6">No leads found.</td></tr>
         {% endif %}
     </tbody>
 </table>

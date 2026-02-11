@@ -375,15 +375,72 @@ def gateway(
     if daemon_cfg.self_evolve.enabled:
         console.print("[green]>[/green] Self-evolution enabled")
 
+    # Embed web dashboard if marketing web is enabled
+    fastapi_app = None
+    if config.marketing.web.enabled:
+        from nanobot.marketing.consent import ConsentStore
+        from nanobot.marketing.intel_store import IntelStore
+        from nanobot.web.app import create_app
+        from nanobot.web.auth import AuthManager
+
+        data_dir = Path.home() / ".nanobot" / "data"
+        intel_store = IntelStore(db_path=data_dir / "intel.db")
+        consent_store = ConsentStore(db_path=data_dir / "consent.db")
+
+        pipedrive_client = None
+        marketing_cfg = config.marketing
+        if marketing_cfg.pipedrive.enabled and marketing_cfg.pipedrive.api_token:
+            try:
+                from nanobot.marketing.pipedrive import PipedriveClient
+
+                pipedrive_client = PipedriveClient(
+                    api_token=marketing_cfg.pipedrive.api_token,
+                    api_url=marketing_cfg.pipedrive.api_url,
+                )
+            except ImportError:
+                pass
+
+        web_channel = channels.get_channel("web")
+        auth_manager = AuthManager(
+            username=marketing_cfg.web.username,
+            password_hash=marketing_cfg.web.password_hash,
+            secret_key=marketing_cfg.web.secret_key or "nanobot-dev-key",
+        )
+
+        fastapi_app = create_app(
+            intel_store=intel_store,
+            pipedrive_client=pipedrive_client,
+            consent_store=consent_store,
+            auth_manager=auth_manager,
+            message_bus=bus,
+            agent=agent,
+            web_channel=web_channel,
+        )
+
+        web_host = marketing_cfg.web.host or "0.0.0.0"
+        web_port = marketing_cfg.web.port or 8080
+        console.print(f"[green]>[/green] Web dashboard on {web_host}:{web_port}")
+
+        # Seed marketing cron jobs (idempotent - skips if name exists)
+        _seed_marketing_cron_jobs(cron)
+
     async def run():
         try:
             await cron.start()
             await cron.execute_missed()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            tasks = [agent.run(), channels.start_all()]
+            if fastapi_app:
+                import uvicorn
+
+                uvi_config = uvicorn.Config(
+                    fastapi_app,
+                    host=web_host,
+                    port=web_port,
+                    log_level="warning",
+                )
+                tasks.append(uvicorn.Server(uvi_config).serve())
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
             heartbeat.stop()
@@ -392,6 +449,65 @@ def gateway(
             await channels.stop_all()
 
     asyncio.run(run())
+
+
+def _seed_marketing_cron_jobs(cron_service: "CronService") -> None:  # noqa: F821
+    """Seed marketing intelligence cron jobs (idempotent)."""
+    from nanobot.cron.types import CronSchedule
+
+    jobs = [
+        {
+            "name": "marketing:news_scan",
+            "schedule": CronSchedule(kind="cron", expr="0 */6 * * *"),
+            "message": (
+                "Scan for new market intelligence signals. "
+                "Use market_intelligence:scan_news to search for German business news, "
+                "then market_intelligence:analyze_signals to extract structured signals."
+            ),
+        },
+        {
+            "name": "marketing:score_leads",
+            "schedule": CronSchedule(kind="cron", expr="0 8 * * *"),
+            "message": (
+                "Score all current leads. Use lead_scoring:score_all to compute lead scores, "
+                "then lead_scoring:match_consultant for any hot-tier leads."
+            ),
+        },
+        {
+            "name": "marketing:daily_brief",
+            "schedule": CronSchedule(kind="cron", expr="0 7 * * *"),
+            "message": "Generate the daily intelligence brief. Use market_report:daily_brief.",
+        },
+        {
+            "name": "marketing:weekly_report",
+            "schedule": CronSchedule(kind="cron", expr="0 8 * * 1"),
+            "message": (
+                "Generate the weekly intelligence report. Use market_report:weekly_report."
+            ),
+        },
+        {
+            "name": "marketing:stale_outreach",
+            "schedule": CronSchedule(kind="cron", expr="0 9 * * *"),
+            "message": (
+                "Check for stale outreach. Use crm:list_outreach_tracking to find "
+                "outreach that has been awaiting response for more than 7 days "
+                "and suggest follow-up actions."
+            ),
+        },
+    ]
+
+    seeded = 0
+    for job_def in jobs:
+        result = cron_service.add_job(
+            name=job_def["name"],
+            schedule=job_def["schedule"],
+            message=job_def["message"],
+        )
+        if result:
+            seeded += 1
+
+    if seeded:
+        logger.info(f"Seeded {seeded} marketing cron jobs")
 
 
 # ============================================================================
