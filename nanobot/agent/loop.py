@@ -151,6 +151,7 @@ class AgentLoop:
         temperature: float = 0.7,
         tool_temperature: float = 0.0,
         timezone: str = "UTC",
+        notification_store: Any = None,
     ):
         from nanobot.config.schema import (
             CompactionConfig,
@@ -180,6 +181,7 @@ class AgentLoop:
         self.compaction_config = compaction_config or CompactionConfig()
         self.memory_config = memory_config or MemoryConfig()
         self.provider_resolver = provider_resolver
+        self.notification_store = notification_store
 
         # Tools-level workspace restriction (applies to file tools and exec)
         self.restrict_to_workspace = restrict_to_workspace or self.exec_config.restrict_to_workspace
@@ -340,12 +342,106 @@ class AgentLoop:
             FollowUpTool(db_path=Path.home() / ".nanobot" / "data" / "followups.db")
         )
 
+        # Marketing tools (registered when marketing config is available)
+        self._register_marketing_tools()
+
         # Self-evolution tool (if enabled)
         if self._evolve_manager:
             from nanobot.agent.tools.evolve import SelfEvolveTool
 
             self.tools.register(SelfEvolveTool(self._evolve_manager))
             self.context.self_evolve_enabled = True
+
+    def _register_marketing_tools(self) -> None:
+        """Register marketing-specific tools when marketing backends are available."""
+        try:
+            from nanobot.marketing.consent import ConsentStore
+            from nanobot.marketing.intel_store import IntelStore
+            from nanobot.marketing.reports import ReportGenerator
+            from nanobot.marketing.scoring import LeadScorer, RecommendationEngine
+
+            data_dir = Path.home() / ".nanobot" / "data"
+            intel_store = IntelStore(db_path=data_dir / "intel.db")
+            consent_store = ConsentStore(db_path=data_dir / "consent.db")
+            report_generator = ReportGenerator()
+            scorer = LeadScorer()
+            rec_engine = RecommendationEngine()
+
+            # CRM tool (routes to Pipedrive + local store)
+            from nanobot.agent.tools.crm import CRMTool
+
+            pipedrive_client = None
+            try:
+                from nanobot.config.loader import load_config
+
+                cfg = load_config()
+                if cfg.marketing.pipedrive.enabled and cfg.marketing.pipedrive.api_token:
+                    from nanobot.marketing.pipedrive import PipedriveClient
+
+                    pipedrive_client = PipedriveClient(
+                        api_token=cfg.marketing.pipedrive.api_token,
+                        api_url=cfg.marketing.pipedrive.api_url,
+                    )
+            except Exception as e:
+                logger.debug(f"Pipedrive not configured: {e}")
+
+            self.tools.register(
+                CRMTool(
+                    pipedrive_client=pipedrive_client,
+                    intel_store=intel_store,
+                    consent_store=consent_store,
+                )
+            )
+
+            # Send email tool
+            from nanobot.agent.tools.email import SendEmailTool
+
+            email_tool = SendEmailTool(
+                send_callback=self.bus.publish_outbound,
+                consent_store=consent_store,
+                report_generator=report_generator,
+            )
+            self.tools.register(email_tool)
+
+            # Market intelligence tool
+            from nanobot.agent.tools.intelligence import MarketIntelligenceTool
+
+            self.tools.register(
+                MarketIntelligenceTool(
+                    intel_store=intel_store,
+                    brave_api_key=self.brave_api_key,
+                    provider=self.provider,
+                    model=self.model,
+                    notification_store=self.notification_store,
+                )
+            )
+
+            # Lead scoring tool
+            from nanobot.agent.tools.lead_scoring import LeadScoringTool
+
+            self.tools.register(
+                LeadScoringTool(
+                    intel_store=intel_store,
+                    scorer=scorer,
+                    recommendation_engine=rec_engine,
+                )
+            )
+
+            # Market report tool
+            from nanobot.agent.tools.report import MarketReportTool
+
+            self.tools.register(
+                MarketReportTool(
+                    report_generator=report_generator,
+                    intel_store=intel_store,
+                )
+            )
+
+            logger.info("Marketing tools registered")
+        except ImportError as e:
+            logger.debug(f"Marketing tools not available: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to register marketing tools: {e}")
 
     def _init_evolve_manager(self, daemon_config: "DaemonConfig") -> None:
         """Initialize the self-evolution manager from config."""
@@ -1069,6 +1165,15 @@ class AgentLoop:
                                 total_iterations=self.max_iterations,
                                 metadata=msg.metadata,
                             )
+                            # Set per-step progress callback on the tool
+                            tool._progress = lambda detail: self._emit_progress(
+                                msg.channel,
+                                msg.chat_id,
+                                ProgressKind.TOOL_START,
+                                tool_name=tool_call.name,
+                                detail=detail,
+                                metadata=msg.metadata,
+                            )
                             async with self._tracer.span(
                                 "tool_exec",
                                 attributes={"tool": tool_call.name},
@@ -1077,6 +1182,7 @@ class AgentLoop:
                                     tool_call.name,
                                     tool_call.arguments,
                                 )
+                            tool._progress = None
                             tool_status = (
                                 "error"
                                 if isinstance(result, str) and result.startswith("Error")

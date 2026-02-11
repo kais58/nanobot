@@ -219,6 +219,11 @@ def gateway(
         registry = AgentRegistry(config.workspace_path)
         console.print("[green]>[/green] Agent registry enabled")
 
+    # Notification store for task/job alerts
+    from nanobot.web.notifications import NotificationStore
+
+    notification_store = NotificationStore(db_path=get_data_dir() / "notifications.db")
+
     # Create agent with channel manager and cron service
     agent = AgentLoop(
         bus=bus,
@@ -246,6 +251,7 @@ def gateway(
         temperature=config.agents.defaults.temperature,
         tool_temperature=config.agents.defaults.tool_temperature,
         timezone=config.agents.defaults.timezone,
+        notification_store=notification_store,
     )
 
     # Set the cron callback using agent's process_direct
@@ -254,12 +260,28 @@ def gateway(
         # Use delivery target as channel context so tools resolve correctly
         ch = job.payload.channel or "cron"
         cid = job.payload.to or job.id
-        response = await agent.process_direct(
-            job.payload.message,
-            session_key=f"cron:{job.id}",
-            channel=ch,
-            chat_id=cid,
+        try:
+            response = await agent.process_direct(
+                job.payload.message,
+                session_key=f"cron:{job.id}",
+                channel=ch,
+                chat_id=cid,
+            )
+        except Exception as e:
+            notification_store.add(
+                title=f"Job '{job.name}' failed",
+                body=str(e)[:200],
+                category="cron_error",
+                link="/tasks",
+            )
+            raise
+
+        notification_store.add(
+            title=f"Job '{job.name}' completed",
+            category="cron_ok",
+            link="/tasks",
         )
+
         # Deliver response to channel if requested
         if job.payload.deliver and job.payload.to and job.payload.channel:
             from nanobot.bus.events import OutboundMessage
@@ -375,15 +397,75 @@ def gateway(
     if daemon_cfg.self_evolve.enabled:
         console.print("[green]>[/green] Self-evolution enabled")
 
+    # Embed web dashboard if marketing web is enabled
+    fastapi_app = None
+    if config.marketing.web.enabled:
+        from nanobot.marketing.consent import ConsentStore
+        from nanobot.marketing.intel_store import IntelStore
+        from nanobot.web.app import create_app
+        from nanobot.web.auth import AuthManager
+
+        data_dir = Path.home() / ".nanobot" / "data"
+        intel_store = IntelStore(db_path=data_dir / "intel.db")
+        consent_store = ConsentStore(db_path=data_dir / "consent.db")
+
+        pipedrive_client = None
+        marketing_cfg = config.marketing
+        if marketing_cfg.pipedrive.enabled and marketing_cfg.pipedrive.api_token:
+            try:
+                from nanobot.marketing.pipedrive import PipedriveClient
+
+                pipedrive_client = PipedriveClient(
+                    api_token=marketing_cfg.pipedrive.api_token,
+                    api_url=marketing_cfg.pipedrive.api_url,
+                )
+            except ImportError:
+                pass
+
+        web_channel = channels.get_channel("web")
+        auth_manager = AuthManager(
+            username=marketing_cfg.web.username,
+            password_hash=marketing_cfg.web.password_hash,
+            secret_key=marketing_cfg.web.secret_key or "nanobot-dev-key",
+        )
+
+        fastapi_app = create_app(
+            intel_store=intel_store,
+            pipedrive_client=pipedrive_client,
+            consent_store=consent_store,
+            auth_manager=auth_manager,
+            message_bus=bus,
+            agent=agent,
+            web_channel=web_channel,
+            cron_service=cron,
+            notification_store=notification_store,
+            timezone=config.agents.defaults.timezone,
+        )
+
+        web_host = marketing_cfg.web.host or "0.0.0.0"
+        web_port = marketing_cfg.web.port or 8080
+        console.print(f"[green]>[/green] Web dashboard on {web_host}:{web_port}")
+
+        # Seed marketing cron jobs (idempotent - skips if name exists)
+        _seed_marketing_cron_jobs(cron)
+
     async def run():
         try:
             await cron.start()
             await cron.execute_missed()
             await heartbeat.start()
-            await asyncio.gather(
-                agent.run(),
-                channels.start_all(),
-            )
+            tasks = [agent.run(), channels.start_all()]
+            if fastapi_app:
+                import uvicorn
+
+                uvi_config = uvicorn.Config(
+                    fastapi_app,
+                    host=web_host,
+                    port=web_port,
+                    log_level="warning",
+                )
+                tasks.append(uvicorn.Server(uvi_config).serve())
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
             heartbeat.stop()
@@ -392,6 +474,65 @@ def gateway(
             await channels.stop_all()
 
     asyncio.run(run())
+
+
+def _seed_marketing_cron_jobs(cron_service: "CronService") -> None:  # noqa: F821
+    """Seed marketing intelligence cron jobs (idempotent)."""
+    from nanobot.cron.types import CronSchedule
+
+    jobs = [
+        {
+            "name": "marketing:news_scan",
+            "schedule": CronSchedule(kind="cron", expr="0 */6 * * *"),
+            "message": (
+                "Scan for new market intelligence signals. "
+                "Use market_intelligence:scan_news to search for German business news, "
+                "then market_intelligence:analyze_signals to extract structured signals."
+            ),
+        },
+        {
+            "name": "marketing:score_leads",
+            "schedule": CronSchedule(kind="cron", expr="0 8 * * *"),
+            "message": (
+                "Score all current leads. Use lead_scoring:score_all to compute lead scores, "
+                "then lead_scoring:match_consultant for any hot-tier leads."
+            ),
+        },
+        {
+            "name": "marketing:daily_brief",
+            "schedule": CronSchedule(kind="cron", expr="0 7 * * *"),
+            "message": "Generate the daily intelligence brief. Use market_report:daily_brief.",
+        },
+        {
+            "name": "marketing:weekly_report",
+            "schedule": CronSchedule(kind="cron", expr="0 8 * * 1"),
+            "message": (
+                "Generate the weekly intelligence report. Use market_report:weekly_report."
+            ),
+        },
+        {
+            "name": "marketing:stale_outreach",
+            "schedule": CronSchedule(kind="cron", expr="0 9 * * *"),
+            "message": (
+                "Check for stale outreach. Use crm:list_outreach_tracking to find "
+                "outreach that has been awaiting response for more than 7 days "
+                "and suggest follow-up actions."
+            ),
+        },
+    ]
+
+    seeded = 0
+    for job_def in jobs:
+        result = cron_service.add_job(
+            name=job_def["name"],
+            schedule=job_def["schedule"],
+            message=job_def["message"],
+        )
+        if result:
+            seeded += 1
+
+    if seeded:
+        logger.info(f"Seeded {seeded} marketing cron jobs")
 
 
 # ============================================================================
@@ -1438,6 +1579,76 @@ def reset(
         console.print(f"\n[green]Reset complete:[/green] {', '.join(cleared)}")
     else:
         console.print("\nNo directories were removed.")
+
+
+# ============================================================================
+# Marketing Dashboard (serve)
+# ============================================================================
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("0.0.0.0", "--host", "-h", help="Dashboard host"),
+    port: int = typer.Option(8080, "--port", "-p", help="Dashboard port"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+):
+    """Start the K&P Marketing web dashboard."""
+    import uvicorn
+
+    from nanobot.config.loader import load_config
+
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+
+    config = load_config()
+    marketing_cfg = config.marketing
+
+    # Override with config values if present
+    if marketing_cfg.web.host:
+        host = marketing_cfg.web.host
+    if marketing_cfg.web.port:
+        port = marketing_cfg.web.port
+
+    # Initialize marketing backends
+    from nanobot.marketing.consent import ConsentStore
+    from nanobot.marketing.intel_store import IntelStore
+    from nanobot.web.app import create_app
+    from nanobot.web.auth import AuthManager
+
+    data_dir = Path.home() / ".nanobot" / "data"
+    intel_store = IntelStore(db_path=data_dir / "intel.db")
+    consent_store = ConsentStore(db_path=data_dir / "consent.db")
+
+    # Pipedrive client (optional)
+    pipedrive_client = None
+    if marketing_cfg.pipedrive.enabled and marketing_cfg.pipedrive.api_token:
+        try:
+            from nanobot.marketing.pipedrive import PipedriveClient
+
+            pipedrive_client = PipedriveClient(
+                api_token=marketing_cfg.pipedrive.api_token,
+                api_url=marketing_cfg.pipedrive.api_url,
+            )
+        except ImportError:
+            console.print("[yellow]Pipedrive client not available[/yellow]")
+
+    auth_manager = AuthManager(
+        username=marketing_cfg.web.username,
+        password_hash=marketing_cfg.web.password_hash,
+        secret_key=marketing_cfg.web.secret_key or "nanobot-dev-key",
+    )
+
+    fastapi_app = create_app(
+        intel_store=intel_store,
+        pipedrive_client=pipedrive_client,
+        consent_store=consent_store,
+        auth_manager=auth_manager,
+    )
+
+    console.print(f"{__logo__} Starting K&P Marketing Dashboard on {host}:{port}...")
+    uvicorn.run(fastapi_app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

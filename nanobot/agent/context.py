@@ -94,6 +94,7 @@ class ContextBuilder:
         "USER.md",
         "TOOLS.md",
         "IDENTITY.md",
+        "COMPANY.md",
     ]
 
     def __init__(
