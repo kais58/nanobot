@@ -109,9 +109,9 @@ class InstallMCPServerTool(Tool):
             config = load_config()
             if server_name in config.tools.mcp.servers:
                 return (
-                    f"MCP server '{server_name}' is already configured. "
-                    "Use the {server_name}_* tools for operations. "
-                    "To reinstall, remove the server from config (tools.mcp.servers) first."
+                    f"Error: MCP server '{server_name}' already exists. "
+                    "To reinstall, remove the server from config "
+                    "(tools.mcp.servers) first."
                 )
 
             # Run installation

@@ -28,7 +28,8 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.compaction import CompactionConfig as SessionCompactionConfig
-
+from nanobot.session.compaction import SessionCompactor
+from nanobot.session.manager import SessionManager
 
 _TOOL_CALL_BLOCK_RE = re.compile(
     r"<tool_call>\s*\w+.*?</tool_call>",
@@ -82,8 +83,7 @@ def _strip_tool_call_blocks_from_content(content: str | None) -> str:
         return content or ""
     cleaned = _TOOL_CALL_BLOCK_RE.sub("", content)
     return cleaned.strip() or ""
-from nanobot.session.compaction import SessionCompactor
-from nanobot.session.manager import SessionManager
+
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -761,27 +761,6 @@ class AgentLoop:
         # final streamed content, strip them so users never see raw XML.
         if content and "<tool_call>" in content:
             cleaned = _strip_tool_call_blocks_from_content(content)
-            # #region agent log
-            try:
-                _log_path = Path("/root/.nanobot/.cursor/debug.log")
-                _entry = {
-                    "id": f"log_{int(time.time()*1000)}_loop_stream_final",
-                    "timestamp": int(time.time()*1000),
-                    "location": "nanobot/agent/loop.py:stream_final",
-                    "message": "Streaming final content XML strip",
-                    "data": {
-                        "original_has_xml": "<tool_call>" in content,
-                        "cleaned_has_xml": "<tool_call>" in cleaned,
-                        "cleaned_prefix": (cleaned or "")[:220],
-                    },
-                    "runId": "initial",
-                    "hypothesisId": "H6",
-                }
-                with _log_path.open("a", encoding="utf-8") as _f:
-                    _f.write(json.dumps(_entry) + "\n")
-            except Exception:
-                pass
-            # #endregion agent log
             content = cleaned
 
         return content or ""
@@ -1251,43 +1230,17 @@ class AgentLoop:
             # Record token usage
             self._record_usage(response.usage, msg.session_key)
 
-            # #region agent log
-            try:
-                _log_path = Path("/root/.nanobot/.cursor/debug.log")
-                _log_path.parent.mkdir(parents=True, exist_ok=True)
-                _c = response.content or ""
-                _entry = {"id": f"log_{int(time.time()*1000)}_loop_after_llm", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:after_llm", "message": "Response after LLM", "data": {"has_tool_calls": response.has_tool_calls, "content_has_xml": "<tool_call>" in _c, "content_len": len(_c), "content_prefix": _c[:220]}, "runId": "initial", "hypothesisId": "H1"}
-                with _log_path.open("a", encoding="utf-8") as _f:
-                    _f.write(json.dumps(_entry) + "\n")
-            except Exception:
-                pass
-            # #endregion agent log
-
             # Fallback: some models emit tool calls as XML in content instead of structured tool_calls
-            if not response.has_tool_calls and response.content and "<tool_call>" in response.content:
+            if (
+                not response.has_tool_calls
+                and response.content
+                and "<tool_call>" in response.content
+            ):
                 parsed = _parse_tool_calls_from_content(response.content)
-                # #region agent log
-                try:
-                    _log_path = Path("/root/.nanobot/.cursor/debug.log")
-                    _entry = {"id": f"log_{int(time.time()*1000)}_loop_parse", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:parse", "message": "XML parse result", "data": {"parsed_len": len(parsed), "content_has_xml": True}, "runId": "initial", "hypothesisId": "H2"}
-                    with _log_path.open("a", encoding="utf-8") as _f:
-                        _f.write(json.dumps(_entry) + "\n")
-                except Exception:
-                    pass
-                # #endregion agent log
                 if parsed:
                     logger.debug(f"Parsed {len(parsed)} tool call(s) from response content")
                     # Strip XML blocks so we do not store or send raw tool_call tags to the user
                     cleaned_content = _strip_tool_call_blocks_from_content(response.content)
-                    # #region agent log
-                    try:
-                        _log_path = Path("/root/.nanobot/.cursor/debug.log")
-                        _entry = {"id": f"log_{int(time.time()*1000)}_loop_fallback", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:fallback", "message": "XML fallback applied", "data": {"parsed_len": len(parsed), "cleaned_has_xml": "<tool_call>" in (cleaned_content or ""), "cleaned_prefix": (cleaned_content or "")[:180]}, "runId": "initial", "hypothesisId": "H2"}
-                        with _log_path.open("a", encoding="utf-8") as _f:
-                            _f.write(json.dumps(_entry) + "\n")
-                    except Exception:
-                        pass
-                    # #endregion agent log
                     response = LLMResponse(
                         content=cleaned_content,
                         tool_calls=parsed,
@@ -1475,25 +1428,13 @@ class AgentLoop:
             else:
                 # No tool calls -- check if this is truly a final response
                 # or if the agent signaled it wants to continue working.
-                # #region agent log
-                try:
-                    _log_path = Path("/root/.nanobot/.cursor/debug.log")
-                    _c = response.content or ""
-                    _entry = {"id": f"log_{int(time.time()*1000)}_loop_no_tool_calls", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:no_tool_calls", "message": "No tool calls branch", "data": {"content_has_xml": "<tool_call>" in _c, "content_prefix": _c[:220], "streaming_enabled": self._streaming_config.enabled}, "runId": "initial", "hypothesisId": "H3"}
-                    with _log_path.open("a", encoding="utf-8") as _f:
-                        _f.write(json.dumps(_entry) + "\n")
-                except Exception:
-                    pass
-                # #endregion agent log
 
                 # Auto-continuation: if the response indicates ongoing work,
                 # send the intermediate message and self-prompt to continue.
                 if (
                     iteration < self.max_iterations
                     and response.content
-                    and self._needs_continuation(
-                        response.content, response.finish_reason
-                    )
+                    and self._needs_continuation(response.content, response.finish_reason)
                 ):
                     logger.info(
                         f"Auto-continuation triggered at iteration {iteration} "
@@ -1509,9 +1450,7 @@ class AgentLoop:
                         )
                     )
                     # Add to conversation history and inject self-prompt
-                    messages = self.context.add_assistant_message(
-                        messages, response.content
-                    )
+                    messages = self.context.add_assistant_message(messages, response.content)
                     messages.append(
                         {
                             "role": "user",
@@ -1545,17 +1484,6 @@ class AgentLoop:
 
         if final_content is None:
             final_content = "I've completed processing but have no response to give."
-
-        # #region agent log
-        try:
-            _log_path = Path("/root/.nanobot/.cursor/debug.log")
-            _fc = final_content or ""
-            _entry = {"id": f"log_{int(time.time()*1000)}_loop_final", "timestamp": int(time.time()*1000), "location": "nanobot/agent/loop.py:final_content", "message": "Final content before return", "data": {"final_has_xml": "<tool_call>" in _fc, "final_prefix": _fc[:220]}, "runId": "initial", "hypothesisId": "H3"}
-            with _log_path.open("a", encoding="utf-8") as _f:
-                _f.write(json.dumps(_entry) + "\n")
-        except Exception:
-            pass
-        # #endregion agent log
 
         # Post-loop action verification: detect hallucinated actions.
         # If the LLM claimed to perform actions but never called any tools,

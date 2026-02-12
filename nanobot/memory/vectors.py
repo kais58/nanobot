@@ -202,7 +202,7 @@ class VectorStore:
         Handles both new binary format and legacy JSON format.
         """
         # Legacy JSON format starts with '['
-        if data[:1] == b'[':
+        if data[:1] == b"[":
             return json.loads(data.decode("utf-8"))
         # Binary struct format
         count = len(data) // 4
@@ -266,8 +266,7 @@ class VectorStore:
             if not skip_dedup:
                 with sqlite3.connect(self.db_path) as conn:
                     rows = conn.execute(
-                        "SELECT id, embedding FROM vectors "
-                        "ORDER BY id DESC LIMIT 500"
+                        "SELECT id, embedding FROM vectors ORDER BY id DESC LIMIT 500"
                     ).fetchall()
 
                 if rows:
@@ -284,18 +283,14 @@ class VectorStore:
                         sims = dots / norms
                         max_sim = float(np.max(sims))
                         if max_sim > 0.85:
-                            logger.debug(
-                                f"Skipping semantically similar entry (sim={max_sim:.3f})"
-                            )
+                            logger.debug(f"Skipping semantically similar entry (sim={max_sim:.3f})")
                             return False
                     else:
                         for row in rows:
                             existing_emb = self._deserialize_embedding(row[1])
                             sim = self._cosine_similarity(embedding, existing_emb)
                             if sim > 0.85:
-                                logger.debug(
-                                    f"Skipping semantically similar entry (sim={sim:.3f})"
-                                )
+                                logger.debug(f"Skipping semantically similar entry (sim={sim:.3f})")
                                 return False
 
             # Store in database

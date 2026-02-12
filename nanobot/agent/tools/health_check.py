@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.errors import ErrorLogger, ErrorCategory, get_error_logger
+from nanobot.agent.errors import ErrorLogger, get_error_logger
 
 
 class HealthCheckTool:
@@ -118,12 +118,14 @@ class HealthCheckTool:
         ]
 
         if worst_recovery and worst_value < 0.5:
-            report.extend([
-                "⚠️ **Low Recovery Rate**",
-                f"Category '{worst_recovery}' only recovers {worst_value * 100:.0f}% of the time.",
-                "This may indicate a persistent issue that needs attention.",
-                "",
-            ])
+            report.extend(
+                [
+                    "⚠️ **Low Recovery Rate**",
+                    f"Category '{worst_recovery}' only recovers {worst_value * 100:.0f}% of the time.",
+                    "This may indicate a persistent issue that needs attention.",
+                    "",
+                ]
+            )
 
         if errors_last_hour > 0:
             report.append("## Error Categories (Last Hour)")
@@ -133,9 +135,7 @@ class HealthCheckTool:
 
         return "\n".join(report)
 
-    def _format_top_errors(
-        self, top_errors: list[dict[str, Any]], limit: int
-    ) -> str:
+    def _format_top_errors(self, top_errors: list[dict[str, Any]], limit: int) -> str:
         """Format top error categories."""
         report = [
             "# 📊 Top Error Categories",
@@ -161,7 +161,9 @@ class HealthCheckTool:
             )
 
         report.append("")
-        report.append("Recovery rate indicates how often the system automatically recovers from this error type.")
+        report.append(
+            "Recovery rate indicates how often the system automatically recovers from this error type."
+        )
         report.append("- ✅ >80%: Good automatic recovery")
         report.append("- ⚠️ 50-80%: Partial recovery, some manual intervention needed")
         report.append("- ❌ <50%: Poor recovery, needs investigation")
@@ -198,20 +200,18 @@ class HealthCheckTool:
             tool = err.get("tool_name")
             severity = err.get("severity", "info")
 
-            severity_emoji = "🔴" if severity == "critical" else "🟠" if severity == "error" else "🟡"
+            severity_emoji = (
+                "🔴" if severity == "critical" else "🟠" if severity == "error" else "🟡"
+            )
 
             tool_info = f" ({tool})" if tool else ""
 
-            report.append(
-                f"{i}. {severity_emoji} [{ts}] {category}{tool_info}"
-            )
+            report.append(f"{i}. {severity_emoji} [{ts}] {category}{tool_info}")
             report.append(f"   {message}")
 
         return "\n".join(report)
 
-    def _format_full_report(
-        self, logger: ErrorLogger, limit: int, minutes: int
-    ) -> str:
+    def _format_full_report(self, logger: ErrorLogger, limit: int, minutes: int) -> str:
         """Format full health report."""
         sections = []
 
@@ -224,7 +224,9 @@ class HealthCheckTool:
 
         # Recent errors
         sections.append("")
-        sections.append(self._format_recent_errors(logger.get_recent_errors(minutes), minutes, limit))
+        sections.append(
+            self._format_recent_errors(logger.get_recent_errors(minutes), minutes, limit)
+        )
 
         return "\n".join(sections)
 

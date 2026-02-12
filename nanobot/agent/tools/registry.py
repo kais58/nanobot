@@ -1,6 +1,5 @@
 """Tool registry for dynamic tool management."""
 
-import json
 from typing import Any
 
 from nanobot.agent.tools.base import Tool
