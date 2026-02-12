@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,10 +26,64 @@ from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.progress import ProgressEvent, ProgressKind
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager
-from nanobot.providers.base import LLMProvider
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.compaction import CompactionConfig as SessionCompactionConfig
 from nanobot.session.compaction import SessionCompactor
 from nanobot.session.manager import SessionManager
+
+_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<tool_call>\s*\w+.*?</tool_call>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def _parse_tool_calls_from_content(content: str | None) -> list[ToolCallRequest]:
+    """Parse XML-style tool calls from response content when the model emits them as text.
+
+    Handles format: <tool_call>NAME<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>
+    Returns a list of ToolCallRequest; content is not modified.
+    """
+    if not content or "<tool_call>" not in content:
+        return []
+    out: list[ToolCallRequest] = []
+    # Match <tool_call>toolname ... </tool_call>
+    for i, block in enumerate(
+        re.finditer(
+            r"<tool_call>\s*(\w+)\s*(.*?)</tool_call>",
+            content,
+            re.DOTALL | re.IGNORECASE,
+        )
+    ):
+        name = block.group(1).strip()
+        inner = block.group(2)
+        args: dict[str, Any] = {}
+        for kv in re.finditer(
+            r"<arg_key>\s*([^<]*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>",
+            inner,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            k = kv.group(1).strip()
+            v = kv.group(2).strip()
+            if k:
+                args[k] = v
+        if name:
+            out.append(
+                ToolCallRequest(
+                    id=f"content_parse_{i}_{int(time.time() * 1000)}",
+                    name=name,
+                    arguments=args,
+                )
+            )
+    return out
+
+
+def _strip_tool_call_blocks_from_content(content: str | None) -> str:
+    """Remove <tool_call>...</tool_call> blocks so they are not shown to the user."""
+    if not content or "<tool_call>" not in content:
+        return content or ""
+    cleaned = _TOOL_CALL_BLOCK_RE.sub("", content)
+    return cleaned.strip() or ""
+
 
 if TYPE_CHECKING:
     from nanobot.config.schema import (
@@ -83,8 +138,6 @@ def _format_memory_age(created_at: str) -> str:
     if not created_at:
         return "unknown age"
     try:
-        from datetime import datetime, timezone
-
         ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
         # Ensure both are offset-aware or both naive
         now = datetime.now(timezone.utc)
@@ -274,7 +327,37 @@ class AgentLoop:
         )
 
         self._running = False
+        # Names of tools that support set_context(channel, chat_id)
+        self._context_tools = ("message", "spawn", "cron", "install_mcp_server", "follow_up")
+        # Background tasks for fire-and-forget memory operations
+        self._background_tasks: set[asyncio.Task] = set()
         self._register_default_tools()
+
+    def _spawn_background(self, coro) -> None:
+        """Schedule a coroutine as a fire-and-forget background task.
+
+        The task is tracked so it doesn't get garbage-collected, and errors
+        are logged rather than silently swallowed.
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+
+        def _on_done(t: asyncio.Task) -> None:
+            self._background_tasks.discard(t)
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc:
+                logger.warning(f"Background task failed: {exc}")
+
+        task.add_done_callback(_on_done)
+
+    def _update_tool_contexts(self, channel: str, chat_id: str) -> None:
+        """Update channel/chat context on all tools that support it."""
+        for name in self._context_tools:
+            tool = self.tools.get(name)
+            if tool and hasattr(tool, "set_context"):
+                tool.set_context(channel, chat_id)
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -556,19 +639,33 @@ class AgentLoop:
             logger.warning(f"Failed to record tool lesson: {e}")
 
     def _check_context_budget(self, messages: list[dict]) -> None:
-        """Log warnings if approaching context limits."""
+        """Log warnings if approaching context limits.
+
+        Uses character-based estimation (chars // 4) for fast approximate
+        checks, only calling the full tokenizer when near the limit.
+        """
+        max_tokens = self.context_config.max_context_tokens
+
+        # Fast estimation: ~4 chars per token
+        total_chars = sum(len(m.get("content", "") or "") for m in messages)
+        est_tokens = total_chars // 4
+        threshold_80 = max_tokens * 0.8
+
+        if est_tokens < threshold_80:
+            return  # Safely under budget, skip expensive tokenization
+
+        # Near budget — do precise count
         from nanobot.utils.tokens import count_messages_tokens
 
         total_tokens = count_messages_tokens(messages)
-        max_tokens = self.context_config.max_context_tokens
-        threshold = max_tokens * 0.9  # 90% warning threshold
+        threshold = max_tokens * 0.9
 
         if total_tokens > threshold:
             logger.warning(
                 f"Context approaching limit: {total_tokens}/{max_tokens} tokens "
                 f"({total_tokens / max_tokens * 100:.1f}%)"
             )
-        elif total_tokens > max_tokens * 0.8:
+        elif total_tokens > threshold_80:
             logger.debug(f"Context at {total_tokens / max_tokens * 100:.1f}% capacity")
 
     async def _emit_progress(
@@ -660,8 +757,32 @@ class AgentLoop:
                 if chunk.usage:
                     self._record_usage(chunk.usage, f"{channel}:{chat_id}")
                 break
+        # If the model mistakenly emits XML-style <tool_call> blocks in the
+        # final streamed content, strip them so users never see raw XML.
+        if content and "<tool_call>" in content:
+            cleaned = _strip_tool_call_blocks_from_content(content)
+            content = cleaned
 
         return content or ""
+
+    # Patterns indicating the LLM intends to continue working (not a final response)
+    _CONTINUATION_PATTERN = re.compile(
+        r"\b(?:"
+        r"(?:Now )?[Ll]et me (?:check|look|search|find|investigate|continue|proceed|verify"
+        r"|examine|analyze|review|scan|fetch|query|see|start|do|run|try|create|set up"
+        r"|work on|figure out|dig into|pull up|look into)"
+        r"|I'?ll (?:now |also |then |first |next )?(?:check|look|search|find|investigate"
+        r"|continue|proceed|verify|examine|analyze|review|scan|fetch|query|see|start|do"
+        r"|run|try|create|set up|work on|figure out|dig into|pull up|look into)"
+        r"|(?:Checking|Looking|Searching|Finding|Investigating|Continuing|Proceeding"
+        r"|Verifying|Examining|Analyzing|Reviewing|Scanning|Fetching|Querying"
+        r"|Working on|Processing|Running|Executing|Starting|Setting up)"
+        r"|(?:First|Next|Then|Now),? (?:let me|I'?ll|I need to|I should|I will|I want to)"
+        r"|(?:One moment|Hold on|Give me a (?:moment|second|sec))"
+        r"|(?:now (?:let me|I need to|I should|checking|looking))"
+        r")\b",
+        re.IGNORECASE,
+    )
 
     # Patterns that indicate the LLM claims to have performed an action
     _ACTION_CLAIM_PATTERN = re.compile(
@@ -676,6 +797,39 @@ class AgentLoop:
         r")\b",
         re.IGNORECASE,
     )
+
+    def _needs_continuation(self, content: str, finish_reason: str | None = None) -> bool:
+        """Detect if a response indicates the agent wants to continue working.
+
+        Returns True when:
+        - The response was truncated due to token limits (finish_reason='length')
+        - The response contains continuation language ('Let me check...', 'Now I\'ll...')
+          AND ends with such language (not just mentioning it in passing)
+
+        This allows the agent loop to self-prompt instead of stopping prematurely.
+        """
+        # Token limit truncation always warrants continuation
+        if finish_reason == "length":
+            return True
+
+        if not content:
+            return False
+
+        # Check if the response ends with continuation language
+        # (not just contains it somewhere in the middle of a complete answer)
+        # Look at the last ~200 chars to check if the ending signals more work
+        tail = content[-200:].strip() if len(content) > 200 else content.strip()
+
+        # If the tail ends with a colon, it's likely introducing a list/result
+        # that got cut off, or announcing next steps
+        if tail.endswith(":"):
+            return True
+
+        # Check if continuation language appears in the tail
+        if self._CONTINUATION_PATTERN.search(tail):
+            return True
+
+        return False
 
     def _contains_unverified_actions(self, content: str) -> bool:
         """Detect if a response claims actions were performed.
@@ -897,6 +1051,12 @@ class AgentLoop:
         """Stop the agent loop."""
         self._running = False
 
+        # Wait for in-flight background tasks (memory indexing, etc.)
+        if self._background_tasks:
+            logger.debug(f"Draining {len(self._background_tasks)} background tasks")
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            self._background_tasks.clear()
+
         # Stop MCP servers
         if self.mcp_manager:
             await self.mcp_manager.stop()
@@ -954,34 +1114,7 @@ class AgentLoop:
         session = self.sessions.get_or_create(msg.session_key)
 
         # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(msg.channel, msg.chat_id)
-
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(msg.channel, msg.chat_id)
-
-        # Update cron tool context
-        from nanobot.agent.tools.cron import CronTool
-
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(msg.channel, msg.chat_id)
-
-        # Update MCP install tool context
-        from nanobot.agent.tools.mcp_install import InstallMCPServerTool
-
-        mcp_install_tool = self.tools.get("install_mcp_server")
-        if isinstance(mcp_install_tool, InstallMCPServerTool):
-            mcp_install_tool.set_context(msg.channel, msg.chat_id)
-
-        # Update follow-up tool context
-        from nanobot.agent.tools.followup import FollowUpTool
-
-        followup_tool = self.tools.get("follow_up")
-        if isinstance(followup_tool, FollowUpTool):
-            followup_tool.set_context(msg.channel, msg.chat_id)
+        self._update_tool_contexts(msg.channel, msg.chat_id)
 
         # Extract channel context from metadata (e.g., Discord channel history)
         channel_context = msg.metadata.get("channel_context", "") if msg.metadata else ""
@@ -995,12 +1128,19 @@ class AgentLoop:
             else:
                 channel_context = reply_header
 
-        # Classify intent to decide memory injection and tool_choice
-        intent = await self._intent_classifier.classify(msg.content)
+        # Classify intent and auto-recall in parallel where possible.
+        # Start optimistic memory recall concurrently with intent classification;
+        # discard the result only if intent turns out to be FACTUAL.
+        intent_task = asyncio.create_task(self._intent_classifier.classify(msg.content))
+        recall_task = asyncio.create_task(self._auto_recall_optimistic(msg.content))
+
+        intent = await intent_task
         logger.debug(f"Query intent: {intent.value}")
 
-        # Auto-recall relevant memories (intent-aware)
-        memory_context = await self._auto_recall(msg.content, intent)
+        # Get recall result (already computed in parallel)
+        memory_context = await recall_task
+        if intent == QueryIntent.FACTUAL:
+            memory_context = None  # discard for factual queries
         if memory_context:
             if channel_context:
                 channel_context = f"{memory_context}\n\n{channel_context}"
@@ -1090,6 +1230,24 @@ class AgentLoop:
             # Record token usage
             self._record_usage(response.usage, msg.session_key)
 
+            # Fallback: some models emit tool calls as XML in content instead of structured tool_calls
+            if (
+                not response.has_tool_calls
+                and response.content
+                and "<tool_call>" in response.content
+            ):
+                parsed = _parse_tool_calls_from_content(response.content)
+                if parsed:
+                    logger.debug(f"Parsed {len(parsed)} tool call(s) from response content")
+                    # Strip XML blocks so we do not store or send raw tool_call tags to the user
+                    cleaned_content = _strip_tool_call_blocks_from_content(response.content)
+                    response = LLMResponse(
+                        content=cleaned_content,
+                        tool_calls=parsed,
+                        finish_reason=response.finish_reason,
+                        usage=response.usage,
+                    )
+
             # Handle tool calls
             if response.has_tool_calls:
                 tools_called += len(response.tool_calls)
@@ -1109,97 +1267,134 @@ class AgentLoop:
                     messages, response.content, tool_call_dicts
                 )
 
-                # Execute tools with validation
+                # Execute tools — parallelize independent tool calls
+                tool_results: list[tuple[Any, str]] = []  # (tool_call, result)
+
+                # Phase 1: Pre-validate and check guardrails (fast, synchronous-ish)
+                executable: list[Any] = []
                 for tool_call in response.tool_calls:
                     tool = self.tools.get(tool_call.name)
                     if not tool:
                         result = f"Error: unknown tool '{tool_call.name}'"
                         logger.warning(f"LLM called unknown tool: {tool_call.name}")
-                    else:
-                        errors = tool.validate_params(tool_call.arguments)
-                        if errors:
+                        tool_results.append((tool_call, result))
+                        continue
+
+                    errors = tool.validate_params(tool_call.arguments)
+                    if errors:
+                        result = (
+                            f"Error: invalid arguments for {tool_call.name} - {'; '.join(errors)}"
+                        )
+                        logger.warning(f"Tool validation failed: {tool_call.name} - {errors}")
+                        tool_results.append((tool_call, result))
+                        continue
+
+                    # Guardrail check before execution
+                    rule = self._guardrails.check(
+                        tool_call.name,
+                        tool_call.arguments,
+                    )
+                    if rule:
+                        approval_id = self._guardrails.request_approval(
+                            rule,
+                            tool_call.name,
+                            tool_call.arguments,
+                        )
+                        approved = await self._guardrails.wait_for_approval(
+                            approval_id,
+                        )
+                        if not approved:
                             result = (
-                                f"Error: invalid arguments for "
-                                f"{tool_call.name} - {'; '.join(errors)}"
+                                f"Error: {rule.description} blocked by guardrail "
+                                f"(approval denied or timed out)"
                             )
-                            logger.warning(f"Tool validation failed: {tool_call.name} - {errors}")
+                            tool_results.append((tool_call, result))
+                            continue
+
+                    executable.append(tool_call)
+
+                # Phase 2: Execute validated tools in parallel
+                if len(executable) > 1:
+                    # Parallel execution for multiple independent tool calls
+                    async def _exec_one(tc):
+                        args_str = json.dumps(tc.arguments)
+                        logger.debug(f"Executing tool: {tc.name} with arguments: {args_str}")
+                        await self._emit_progress(
+                            msg.channel,
+                            msg.chat_id,
+                            ProgressKind.TOOL_START,
+                            tool_name=tc.name,
+                            detail=f"Executing {tc.name}",
+                            iteration=iteration,
+                            total_iterations=self.max_iterations,
+                            metadata=msg.metadata,
+                        )
+                        async with self._tracer.span(
+                            "tool_exec",
+                            attributes={"tool": tc.name},
+                        ):
+                            res = await self.tools.execute(tc.name, tc.arguments)
+                        tool_status = (
+                            "error" if isinstance(res, str) and res.startswith("Error") else "ok"
+                        )
+                        await self._emit_progress(
+                            msg.channel,
+                            msg.chat_id,
+                            ProgressKind.TOOL_COMPLETE,
+                            tool_name=tc.name,
+                            detail=f"{tc.name}: {tool_status}",
+                            iteration=iteration,
+                            total_iterations=self.max_iterations,
+                            metadata=msg.metadata,
+                        )
+                        return res
+
+                    results = await asyncio.gather(
+                        *[_exec_one(tc) for tc in executable],
+                        return_exceptions=True,
+                    )
+                    for tc, res in zip(executable, results):
+                        if isinstance(res, Exception):
+                            tool_results.append((tc, f"Error executing {tc.name}: {res}"))
                         else:
-                            # Guardrail check before execution
-                            rule = self._guardrails.check(
-                                tool_call.name,
-                                tool_call.arguments,
-                            )
-                            if rule:
-                                approval_id = self._guardrails.request_approval(
-                                    rule,
-                                    tool_call.name,
-                                    tool_call.arguments,
-                                )
-                                approved = await self._guardrails.wait_for_approval(
-                                    approval_id,
-                                )
-                                if not approved:
-                                    result = (
-                                        f"Error: {rule.description} blocked by guardrail "
-                                        f"(approval denied or timed out)"
-                                    )
-                                    messages = self.context.add_tool_result(
-                                        messages,
-                                        tool_call.id,
-                                        tool_call.name,
-                                        result,
-                                    )
-                                    continue
+                            tool_results.append((tc, res))
+                elif len(executable) == 1:
+                    # Single tool — no gather overhead
+                    tc = executable[0]
+                    args_str = json.dumps(tc.arguments)
+                    logger.debug(f"Executing tool: {tc.name} with arguments: {args_str}")
+                    await self._emit_progress(
+                        msg.channel,
+                        msg.chat_id,
+                        ProgressKind.TOOL_START,
+                        tool_name=tc.name,
+                        detail=f"Executing {tc.name}",
+                        iteration=iteration,
+                        total_iterations=self.max_iterations,
+                        metadata=msg.metadata,
+                    )
+                    async with self._tracer.span(
+                        "tool_exec",
+                        attributes={"tool": tc.name},
+                    ):
+                        result = await self.tools.execute(tc.name, tc.arguments)
+                    tool_status = (
+                        "error" if isinstance(result, str) and result.startswith("Error") else "ok"
+                    )
+                    await self._emit_progress(
+                        msg.channel,
+                        msg.chat_id,
+                        ProgressKind.TOOL_COMPLETE,
+                        tool_name=tc.name,
+                        detail=f"{tc.name}: {tool_status}",
+                        iteration=iteration,
+                        total_iterations=self.max_iterations,
+                        metadata=msg.metadata,
+                    )
+                    tool_results.append((tc, result))
 
-                            args_str = json.dumps(tool_call.arguments)
-                            logger.debug(
-                                f"Executing tool: {tool_call.name} with arguments: {args_str}"
-                            )
-                            await self._emit_progress(
-                                msg.channel,
-                                msg.chat_id,
-                                ProgressKind.TOOL_START,
-                                tool_name=tool_call.name,
-                                detail=f"Executing {tool_call.name}",
-                                iteration=iteration,
-                                total_iterations=self.max_iterations,
-                                metadata=msg.metadata,
-                            )
-                            # Set per-step progress callback on the tool
-                            tool._progress = lambda detail: self._emit_progress(
-                                msg.channel,
-                                msg.chat_id,
-                                ProgressKind.TOOL_START,
-                                tool_name=tool_call.name,
-                                detail=detail,
-                                metadata=msg.metadata,
-                            )
-                            async with self._tracer.span(
-                                "tool_exec",
-                                attributes={"tool": tool_call.name},
-                            ):
-                                result = await self.tools.execute(
-                                    tool_call.name,
-                                    tool_call.arguments,
-                                )
-                            tool._progress = None
-                            tool_status = (
-                                "error"
-                                if isinstance(result, str) and result.startswith("Error")
-                                else "ok"
-                            )
-                            await self._emit_progress(
-                                msg.channel,
-                                msg.chat_id,
-                                ProgressKind.TOOL_COMPLETE,
-                                tool_name=tool_call.name,
-                                detail=f"{tool_call.name}: {tool_status}",
-                                iteration=iteration,
-                                total_iterations=self.max_iterations,
-                                metadata=msg.metadata,
-                            )
-
-                    # Reflexion: track consecutive tool failures
+                # Phase 3: Post-process results (reflexion, hints, truncation)
+                for tool_call, result in tool_results:
                     if isinstance(result, str) and result.startswith("Error"):
                         count = self._tool_failure_counts.get(tool_call.name, 0) + 1
                         self._tool_failure_counts[tool_call.name] = count
@@ -1227,17 +1422,62 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
-                    # Per-tool compaction check (F10)
-                    messages = await self._maybe_compact(messages, session)
+
+                # Post-iteration compaction check (once per iteration, not per tool)
+                messages = await self._maybe_compact(messages, session)
             else:
-                # No tool calls -- final response
+                # No tool calls -- check if this is truly a final response
+                # or if the agent signaled it wants to continue working.
+
+                # Auto-continuation: if the response indicates ongoing work,
+                # send the intermediate message and self-prompt to continue.
+                if (
+                    iteration < self.max_iterations
+                    and response.content
+                    and self._needs_continuation(response.content, response.finish_reason)
+                ):
+                    logger.info(
+                        f"Auto-continuation triggered at iteration {iteration} "
+                        f"(finish_reason={response.finish_reason})"
+                    )
+                    # Send the intermediate message to the user immediately
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel=msg.channel,
+                            chat_id=msg.chat_id,
+                            content=response.content,
+                            metadata=msg.metadata,
+                        )
+                    )
+                    # Add to conversation history and inject self-prompt
+                    messages = self.context.add_assistant_message(messages, response.content)
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "[SYSTEM: You indicated you had more work to do. "
+                                "Continue with your task. Call the appropriate tools "
+                                "to proceed. When you are fully done, provide your "
+                                "final summary.]"
+                            ),
+                        }
+                    )
+                    # Compact if needed after injecting continuation
+                    messages = await self._maybe_compact(messages, session)
+                    continue  # Re-enter the while loop
+
                 if self._streaming_config.enabled:
-                    final_content = await self._stream_final_response(
+                    streamed_content = await self._stream_final_response(
                         messages,
                         msg.channel,
                         msg.chat_id,
                         msg.metadata,
                     )
+                    # If streaming produced nothing usable (e.g. only XML tool_call
+                    # blocks that were stripped), fall back to the original
+                    # non-streamed response content so the user still sees an
+                    # answer instead of a blank message.
+                    final_content = streamed_content or (response.content or "")
                 else:
                     final_content = response.content
                 break
@@ -1334,11 +1574,22 @@ class AgentLoop:
             )
             components = self._parse_clarification_options(final_content)
 
-        # Index conversation to memory (async, don't block response)
-        await self._index_conversation(msg.session_key, msg.content, final_content)
+        # Index conversation to memory (fire-and-forget, don't block response)
+        self._spawn_background(
+            self._index_conversation(
+                msg.session_key,
+                msg.content,
+                final_content,
+            )
+        )
 
         # Periodic extraction and consolidation of facts and lessons
-        await self._maybe_extract_and_consolidate(session, msg.session_key)
+        self._spawn_background(
+            self._maybe_extract_and_consolidate(
+                session,
+                msg.session_key,
+            )
+        )
 
         return OutboundMessage(
             channel=msg.channel,
@@ -1372,27 +1623,7 @@ class AgentLoop:
         session = self.sessions.get_or_create(session_key)
 
         # Update tool contexts
-        message_tool = self.tools.get("message")
-        if isinstance(message_tool, MessageTool):
-            message_tool.set_context(origin_channel, origin_chat_id)
-
-        spawn_tool = self.tools.get("spawn")
-        if isinstance(spawn_tool, SpawnTool):
-            spawn_tool.set_context(origin_channel, origin_chat_id)
-
-        # Update cron tool context
-        from nanobot.agent.tools.cron import CronTool
-
-        cron_tool = self.tools.get("cron")
-        if isinstance(cron_tool, CronTool):
-            cron_tool.set_context(origin_channel, origin_chat_id)
-
-        # Update MCP install tool context
-        from nanobot.agent.tools.mcp_install import InstallMCPServerTool
-
-        mcp_install_tool = self.tools.get("install_mcp_server")
-        if isinstance(mcp_install_tool, InstallMCPServerTool):
-            mcp_install_tool.set_context(origin_channel, origin_chat_id)
+        self._update_tool_contexts(origin_channel, origin_chat_id)
 
         # Build messages with the announce content (token-aware history)
         messages = self.context.build_messages(
@@ -1452,7 +1683,12 @@ class AgentLoop:
         session.add_message("assistant", final_content)
         self.sessions.save(session)
 
-        await self._maybe_extract_and_consolidate(session, session_key)
+        self._spawn_background(
+            self._maybe_extract_and_consolidate(
+                session,
+                session_key,
+            )
+        )
 
         return OutboundMessage(
             channel=origin_channel, chat_id=origin_chat_id, content=final_content
@@ -1495,6 +1731,19 @@ class AgentLoop:
         )
         response = await self._process_message(msg)
         return response.content if response else ""
+
+    async def _auto_recall_optimistic(
+        self,
+        user_message: str,
+    ) -> str | None:
+        """Optimistic auto-recall: performs memory search without intent filtering.
+
+        Called concurrently with intent classification. The caller is
+        responsible for discarding the result if intent turns out to be
+        FACTUAL. Uses CONVERSATIONAL intent internally (no special
+        annotations) — the caller can re-annotate if needed.
+        """
+        return await self._auto_recall(user_message, QueryIntent.CONVERSATIONAL)
 
     async def _auto_recall(
         self,
