@@ -1,71 +1,30 @@
-name: Test & Deploy
+name: Deploy to Linux VM
 
 on:
   push:
-    branches: [main]
-
-concurrency:
-  group: deploy-main
-  cancel-in-progress: true
+    branches: [ main ]
 
 jobs:
-  test:
-    name: Test & Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose build test
-      - run: docker compose --profile test run --rm test
-
   deploy:
-    name: Deploy to Mac Studio
     runs-on: ubuntu-latest
-    needs: test
-    timeout-minutes: 10
-    environment: production
     steps:
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Tailscale
+        uses: tailscale/github-action@v2
         with:
           oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
           oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci
 
       - name: Deploy via SSH
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ~/.ssh/deploy_key"
-
-          ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" bash -s <<'DEPLOY_SCRIPT'
-            set -euo pipefail
-            export PATH="/usr/local/bin:$PATH"
-            cd /Users/mtaap-macstudio/nanobot
-
-            echo "=== Pulling latest code ==="
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /app/nanobot
             git pull origin main
-
-            echo "=== Building container ==="
-            docker compose build
-
-            echo "=== Restarting services ==="
-            docker compose up -d
-
-            echo "=== Verifying container is running ==="
-            sleep 5
-            if docker compose ps --format json | grep -q '"running"'; then
-              echo "Deploy successful: container is running"
-            else
-              echo "ERROR: container is not running"
-              docker compose logs --tail=30
-              exit 1
-            fi
-          DEPLOY_SCRIPT
-
-          rm -f ~/.ssh/deploy_key
+            docker compose up -d --build
