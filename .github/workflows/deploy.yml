@@ -46,6 +46,18 @@ jobs:
           ssh $SSH_OPTS "${DEPLOY_USER}@${DEPLOY_HOST}" bash -s <<'DEPLOY_SCRIPT'
             set -euo pipefail
             export PATH="/usr/local/bin:$PATH"
+
+            # Ensure Tailscale is installed and connected on the host
+            if ! command -v tailscale &> /dev/null; then
+              echo "Installing Tailscale..."
+              curl -fsSL https://tailscale.com/install.sh | sh
+            fi
+            
+            # Check if Tailscale is up, if not, try to bring it up (requires TS_AUTHKEY env or manual setup)
+            if ! tailscale status &> /dev/null; then
+              echo "Tailscale is not running. Please ensure it is authenticated on the host."
+            fi
+
             cd /Users/mtaap-macstudio/nanobot
 
             echo "=== Pulling latest code ==="
