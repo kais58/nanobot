@@ -193,12 +193,48 @@ class TelegramChannel(BaseChannel):
             reply_markup = None
             if msg.components:
                 reply_markup = self._build_telegram_keyboard(msg.components)
-            await self._app.bot.send_message(
-                chat_id=chat_id,
-                text=html_content,
-                parse_mode="HTML",
-                reply_markup=reply_markup,
-            )
+
+            # Handle media attachments
+            if msg.media:
+                for media_path in msg.media:
+                    try:
+                        # Determine if it's a photo or document based on extension
+                        is_photo = any(
+                            media_path.lower().endswith(ext)
+                            for ext in [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+                        )
+                        if is_photo:
+                            await self._app.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=open(media_path, "rb"),
+                                caption=html_content if media_path == msg.media[0] else None,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup if media_path == msg.media[0] else None,
+                            )
+                        else:
+                            await self._app.bot.send_document(
+                                chat_id=chat_id,
+                                document=open(media_path, "rb"),
+                                caption=html_content if media_path == msg.media[0] else None,
+                                parse_mode="HTML",
+                                reply_markup=reply_markup if media_path == msg.media[0] else None,
+                            )
+                    except Exception as media_err:
+                        logger.error(f"Failed to send media {media_path}: {media_err}")
+                        # Fallback to text if media fails
+                        await self._app.bot.send_message(
+                            chat_id=chat_id,
+                            text=html_content,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+            else:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=html_content,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
         except ValueError:
             logger.error(f"Invalid chat_id: {msg.chat_id}")
         except Exception as e:
