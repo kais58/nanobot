@@ -8,6 +8,11 @@ concurrency:
   group: deploy-main
   cancel-in-progress: true
 
+permissions: 
+  id-token: write
+  contents: read
+  packages: read
+
 jobs:
   test:
     name: Test & Lint
